@@ -1,0 +1,221 @@
+{
+    "entities": {
+        "Q567": {
+            "type": "item",
+            "id": "Q567",
+            "labels": {
+                "en": {
+                    "language": "en",
+                    "value": "Angela Merkel"
+                },
+                "de": {
+                    "language": "de",
+                    "value": "Angela Merkel"
+                }
+            },
+            "descriptions": {
+                "en": {
+                    "language": "en",
+                    "value": "German politician, Chancellor of Germany from 2005 to 2021"
+                },
+                "de": {
+                    "language": "de",
+                    "value": "deutsche Politikerin, Bundeskanzlerin von 2005 bis 2021"
+                }
+            },
+            "aliases": {
+                "en": [
+                    {
+                        "language": "en",
+                        "value": "Angela Dorothea Merkel"
+                    }
+                ]
+            },
+            "claims": {
+                "P39": [
+                    {
+                        "id": "Q567$8F3B4D5E-6C7A-8B9C-0D1E-2F3A4B5C6D7E",
+                        "type": "statement",
+                        "rank": "preferred",
+                        "mainsnak": {
+                            "snaktype": "value",
+                            "property": "P39",
+                            "datavalue": {
+                                "type": "wikibase-entityid",
+                                "value": {
+                                    "entity-type": "item",
+                                    "numeric-id": 4970706,
+                                    "id": "Q4970706"
+                                }
+                            },
+                            "datatype": "wikibase-item"
+                        },
+                        "qualifiers": {
+                            "P580": [
+                                {
+                                    "snaktype": "value",
+                                    "property": "P580",
+                                    "hash": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+                                    "datavalue": {
+                                        "type": "time",
+                                        "value": {
+                                            "time": "+2005-11-22T00:00:00Z",
+                                            "timezone": 0,
+                                            "before": 0,
+                                            "after": 0,
+                                            "precision": 11,
+                                            "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+                                        }
+                                    },
+                                    "datatype": "time"
+                                }
+                            ],
+                            "P582": [
+                                {
+                                    "snaktype": "value",
+                                    "property": "P582",
+                                    "hash": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
+                                    "datavalue": {
+                                        "type": "time",
+                                        "value": {
+                                            "time": "+2021-12-08T00:00:00Z",
+                                            "timezone": 0,
+                                            "before": 0,
+                                            "after": 0,
+                                            "precision": 11,
+                                            "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+                                        }
+                                    },
+                                    "datatype": "time"
+                                }
+                            ],
+                            "P1365": [
+                                {
+                                    "snaktype": "value",
+                                    "property": "P1365",
+                                    "hash": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+                                    "datavalue": {
+                                        "type": "wikibase-entityid",
+                                        "value": {
+                                            "entity-type": "item",
+                                            "numeric-id": 2530,
+                                            "id": "Q2530"
+                                        }
+                                    },
+                                    "datatype": "wikibase-item"
+                                }
+                            ],
+                            "P1366": [
+                                {
+                                    "snaktype": "value",
+                                    "property": "P1366",
+                                    "hash": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3",
+                                    "datavalue": {
+                                        "type": "wikibase-entityid",
+                                        "value": {
+                                            "entity-type": "item",
+                                            "numeric-id": 61053,
+                                            "id": "Q61053"
+                                        }
+                                    },
+                                    "datatype": "wikibase-item"
+                                }
+                            ]
+                        },
+                        "qualifiers-order": [
+                            "P580",
+                            "P582",
+                            "P1365",
+                            "P1366"
+                        ],
+                        "references": [
+                            {
+                                "hash": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",
+                                "snaks": {
+                                    "P854": [
+                                        {
+                                            "snaktype": "value",
+                                            "property": "P854",
+                                            "datavalue": {
+                                                "type": "string",
+                                                "value": "https://www.bundesregierung.de/breg-de/bundesregierung/bundeskanzlerin"
+                                            },
+                                            "datatype": "url"
+                                        }
+                                    ],
+                                    "P813": [
+                                        {
+                                            "snaktype": "value",
+                                            "property": "P813",
+                                            "datavalue": {
+                                                "type": "time",
+                                                "value": {
+                                                    "time": "+2021-12-08T00:00:00Z",
+                                                    "timezone": 0,
+                                                    "before": 0,
+                                                    "after": 0,
+                                                    "precision": 11,
+                                                    "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+                                                }
+                                            },
+                                            "datatype": "time"
+                                        }
+                                    ]
+                                },
+                                "snaks-order": [
+                                    "P854",
+                                    "P813"
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "P31": [
+                    {
+                        "id": "Q567$1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D",
+                        "type": "statement",
+                        "rank": "normal",
+                        "mainsnak": {
+                            "snaktype": "value",
+                            "property": "P31",
+                            "datavalue": {
+                                "type": "wikibase-entityid",
+                                "value": {
+                                    "entity-type": "item",
+                                    "numeric-id": 5,
+                                    "id": "Q5"
+                                }
+                            },
+                            "datatype": "wikibase-item"
+                        },
+                        "qualifiers": {},
+                        "qualifiers-order": [],
+                        "references": []
+                    }
+                ]
+            },
+            "sitelinks": {
+                "enwiki": {
+                    "site": "enwiki",
+                    "title": "Angela Merkel",
+                    "badges": [],
+                    "url": "https://en.wikipedia.org/wiki/Angela_Merkel"
+                },
+                "dewiki": {
+                    "site": "dewiki",
+                    "title": "Angela Merkel",
+                    "badges": [
+                        "Q17437798"
+                    ],
+                    "url": "https://de.wikipedia.org/wiki/Angela_Merkel"
+                }
+            },
+            "lastrevid": 1234567890,
+            "modified": "2024-10-20T15:30:00Z",
+            "title": "Q567",
+            "pageid": 567,
+            "ns": 0
+        }
+    },
+    "success": 1
+}

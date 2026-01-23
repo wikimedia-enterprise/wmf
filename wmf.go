@@ -1,0 +1,2094 @@
+// Package wmf handlers all of the API request for WMF APIs.
+// Including Actions API, REST API and dumps.
+package wmf
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"dario.cat/mergo"
+)
+
+// ErrProjectNotFound appears when project was not found in the site matrix.
+var ErrProjectNotFound = errors.New("project not found")
+
+// ErrLanguageNotFound appears when language was not found in the site matrix.
+var ErrLanguageNotFound = errors.New("language not found")
+
+// ErrPageNotFound appears when page was not found on the website.
+var ErrPageNotFound = errors.New("page not found")
+
+// ErrUserNotFound appears when user was not found in the response payload.
+var ErrUserNotFound = errors.New("user not found")
+
+// ErrHTTPClientNotFound appears http client is set to null when new API client was created.
+var ErrHTTPClientNotFound = errors.New("http client not found")
+
+// ErrLiftWingModelNotFound appears when LiftWing model was not found in the configuration.
+var ErrLiftWingModelNotFound = errors.New("liftwing model not found")
+
+// ErrEntityNotFound appears when a Wikibase entity was not found.
+var ErrEntityNotFound = errors.New("entity not found")
+
+// AllPagesGetter interface for all pages enumeration in specific namespace.
+type AllPagesGetter interface {
+	GetAllPages(ctx context.Context, dtb string, cbk func([]*Page), ops ...func(*url.Values)) error
+}
+
+// PagesGetter interface to expose method that gets list of pages for specific project.
+type PagesGetter interface {
+	GetPages(ctx context.Context, dtb string, tls []string, ops ...func(*url.Values)) (map[string]*Page, error)
+}
+
+// PageGetter interface to expose method that gets single page for specific database name.
+type PageGetter interface {
+	GetPage(ctx context.Context, dtb string, ttl string, ops ...func(*url.Values)) (*Page, error)
+}
+
+// PageHTMLGetter interface to expose method that gets single page HTML content.
+type PageHTMLGetter interface {
+	GetPageHTML(ctx context.Context, dtb string, ttl string, ops ...func(*url.Values)) (string, error)
+}
+
+// PagesHTMLGetter interface to expose method that gets a list page HTML content concurrently.
+type PagesHTMLGetter interface {
+	GetPagesHTML(ctx context.Context, dtb string, tls []string, mxc int, ops ...func(*url.Values)) map[string]*PageHTML
+}
+
+// GetRevisionHTML interface to expose method that gets single page HTML content.
+type RevisionHTMLGetter interface {
+	GetRevisionHTML(ctx context.Context, dtb string, rid string, ops ...func(*url.Values)) (string, error)
+}
+
+// GetRevisionsHTML interface to expose method that gets a list page HTML content concurrently.
+type RevisionsHTMLGetter interface {
+	GetRevisionsHTML(ctx context.Context, dtb string, rvs []string, mxc int, ops ...func(*url.Values)) map[string]*PageHTML
+}
+
+// GetPageByRevision interface to expose method that retrieves a single page given a revision ID and database.
+type RevisionGetter interface {
+	GetPageByRevision(ctx context.Context, database string, revid int, ops ...func(*url.Values)) (*Page, error)
+}
+
+// GetAllRevisions interface to expose method that retrieves all revisions for an article given its pageid and database.
+type AllRevisionsGetter interface {
+	GetAllRevisions(ctx context.Context, database string, pageid int, ops ...func(*url.Values)) ([]*Revision, error)
+}
+
+// LanguagesGetter interface to expose method that gets list of available languages using database name.
+type LanguagesGetter interface {
+	GetLanguages(ctx context.Context, dtb string, ops ...func(*url.Values)) ([]*Language, error)
+}
+
+// LanguageGetter interface to expose method that gets single language using the database name.
+type LanguageGetter interface {
+	GetLanguage(ctx context.Context, dtb string) (*Language, error)
+}
+
+// ProjectsGetter interface to expose method that gets an array of projects using the database name.
+type ProjectsGetter interface {
+	GetProjects(ctx context.Context, dtb string) ([]*Project, error)
+}
+
+// ProjectGetter interface to expose method that gets single project using the database name.
+type ProjectGetter interface {
+	GetProject(ctx context.Context, dtb string) (*Project, error)
+}
+
+// NamespaceGetter interface to expose method that gets a list of namespaces using the database name.
+type NamespacesGetter interface {
+	GetNamespaces(ctx context.Context, dtb string, ops ...func(*url.Values)) ([]*Namespace, error)
+}
+
+// RandomPagesGetter interface to expose method that gets a list of random articles from a project.
+type RandomPagesGetter interface {
+	GetRandomPages(ctx context.Context, dtb string, ops ...func(*url.Values)) ([]*Page, error)
+}
+
+// UsersGetter interface to expose method that finds a list of users by identifiers and database name.
+type UsersGetter interface {
+	GetUsers(ctx context.Context, dtb string, ids []int, ops ...func(*url.Values)) (map[int]*User, error)
+}
+
+// UserGetter interface to expose method that finds a single user by identifier and database name.
+type UserGetter interface {
+	GetUser(ctx context.Context, dtb string, id int, ops ...func(*url.Values)) (*User, error)
+}
+
+// ScoreGetter interface to expose method that gets a score for a revision.
+type ScoreGetter interface {
+	GetScore(ctx context.Context, rev int, lng string, prj string, mdl string) (*Score, error)
+	GetReferenceNeedScore(ctx context.Context, rev int, lng, prj string) (*ReferenceNeedScore, error)
+	GetReferenceRiskScore(ctx context.Context, rev int, lng, prj string) (*ReferenceRiskScore, error)
+}
+
+// PageSummaryGetter interface to expose method that gets page summary for specific page title.
+type PageSummaryGetter interface {
+	GetPageSummary(ctx context.Context, dtb string, ttl string, ops ...func(*url.Values)) (*PageSummary, error)
+}
+
+// ContributorsGetter interface to expose method that fetches contributors and their counts for a specific page ID.
+type ContributorsGetter interface {
+	// GetContributors fetches contributors to a page, stopping pagination early if maxRegistered is reached (if not nil).
+	GetContributors(ctx context.Context, dtb string, pageid int, maxRegistered *int, ops ...func(*url.Values)) (pages []*Page, fetchedAll bool, err error)
+	// GetContributorsCount fetches the count of contributors to a page, stopping pagination early if maxRegistered is reached (if not nil).
+	GetContributorsCount(ctx context.Context, database string, pageid int, maxRegistered *int, ops ...func(*url.Values)) (*ContributorsCount, error)
+}
+
+// FileDownloader interface to download files from commons.
+type FileDownloader interface {
+	DownloadFile(ctx context.Context, url string, ops ...func(*http.Request)) ([]byte, error)
+}
+
+// FileHeader interface to get file header from commons.
+type FileHeader interface {
+	HeadFile(ctx context.Context, url string, ops ...func(*http.Request)) ([]byte, error)
+}
+
+// WikibaseEntityGetter interface to expose method that gets Wikibase entity data for a given entity ID (QID).
+type WikibaseEntityGetter interface {
+	GetWikibaseEntity(ctx context.Context, dtb string, entityID string, ops ...func(*url.Values)) (*WikibaseEntityResponse, error)
+	GetWikidataEntityCreationDate(ctx context.Context, entityTitle string) (*time.Time, error)
+}
+
+// API interface fot the whole API client.
+type API interface {
+	AllPagesGetter
+	PagesGetter
+	PageGetter
+	PagesHTMLGetter
+	PageHTMLGetter
+	RevisionHTMLGetter
+	RevisionsHTMLGetter
+	RevisionGetter
+	AllRevisionsGetter
+	LanguagesGetter
+	LanguageGetter
+	ProjectGetter
+	NamespacesGetter
+	UsersGetter
+	UserGetter
+	ScoreGetter
+	PageSummaryGetter
+	ContributorsGetter
+	FileDownloader
+	FileHeader
+	WikibaseEntityGetter
+}
+
+// Response generic structure for Actions API response.
+type Response struct {
+	BatchComplete bool              `json:"batchcomplete,omitempty"`
+	Continue      map[string]string `json:"continue,omitempty"`
+	Query         *Query            `json:"query,omitempty"`
+	Error         *Error            `json:"error,omitempty"`
+	ServedBy      string            `json:"servedby,omitempty"`
+	SiteMatrix    *SiteMatrix       `json:"sitematrix,omitempty"`
+}
+
+// Error generic structure for Actions API error response.
+type Error struct {
+	Type      string `json:"type,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Code      string `json:"code,omitempty"`
+	Info      string `json:"info,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	LowLimit  int    `json:"lowlimit,omitempty"`
+	HighLimit int    `json:"highlimit,omitempty"`
+	DocRef    string `json:"docref,omitempty"`
+}
+
+// Query response type for the Actions API if you run a query request.
+type Query struct {
+	Redirects  []*Redirect        `json:"redirects,omitempty"`
+	Normalized []*Normalization   `json:"normalized,omitempty"`
+	Pages      []*Page            `json:"pages,omitempty"`
+	Namespaces map[int]*Namespace `json:"namespaces,omitempty"`
+	Users      []*User            `json:"users,omitempty"`
+	AllPages   []*Page            `json:"allpages,omitempty"`
+	Random     []*Page            `json:"random,omitempty"`
+}
+
+// Redirect shows title redirection in Actions API.
+type Redirect struct {
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	PageID int    `json:"pageid"`
+	Ns     int    `json:"ns"`
+	Title  string `json:"title"`
+}
+
+// Category representation of category in Actions API.
+type Category struct {
+	Ns     int    `json:"ns"`
+	Title  string `json:"title"`
+	Hidden bool   `json:"hidden"`
+}
+
+// Template representation of template in Actions API.
+type Template struct {
+	Ns    int    `json:"ns"`
+	Title string `json:"title"`
+}
+
+// Flagged shows is revision was flagged by community in Actions API.
+type Flagged struct {
+	StableRevID  int        `json:"stable_revid"`
+	Level        int        `json:"level"`
+	LevelText    string     `json:"level_text"`
+	PendingSince *time.Time `json:"pending_since"`
+}
+
+// Projection levels of protection and expiration for Actions API.
+type Protection struct {
+	Type   string `json:"type"`
+	Level  string `json:"level"`
+	Expiry string `json:"expiry"`
+}
+
+// Revision representation of revision data in Actions API.
+type Revision struct {
+	RevID     int        `json:"revid"`
+	ParentID  int        `json:"parentid"`
+	User      string     `json:"user"`
+	UserID    int        `json:"userid"`
+	Minor     bool       `json:"minor"`
+	Timestamp *time.Time `json:"timestamp"`
+	Slots     *Slots     `json:"slots"`
+	Comment   string     `json:"comment"`
+	Tags      []string   `json:"tags"`
+}
+
+// Slots revision slots data structure for Actions API.
+type Slots struct {
+	Main *Main `json:"main"`
+}
+
+// Main revision main slot data structure for Actions API.
+type Main struct {
+	ContentModel  string `json:"contentmodel"`
+	ContentFormat string `json:"contentformat"`
+	Content       string `json:"content"`
+}
+
+// Normalization shows title normalization in Actions API.
+type Normalization struct {
+	FromEncoded bool   `json:"fromencoded,omitempty"`
+	From        string `json:"from,omitempty"`
+	To          string `json:"to,omitempty"`
+}
+
+// Ext common representation of a extmetadata.
+type Ext struct {
+	Value string `json:"value"`
+}
+
+// ExtMetadata representation of collection of extmetadata.
+type ExtMetadata struct {
+	LicenseShortName *Ext `json:"LicenseShortName"`
+	LicenseUrl       *Ext `json:"LicenseUrl"`
+}
+
+// ImageinfoElement representation of imageinfo data in Actions API.
+type ImageinfoElement struct {
+	Timestamp      *time.Time   `json:"timestamp"`
+	User           string       `json:"user"`
+	UserID         int          `json:"userid"`
+	Size           int64        `json:"size"`
+	Width          int          `json:"width"`
+	Height         int          `json:"height"`
+	Mime           string       `json:"mime"`
+	Url            string       `json:"url"`
+	DescriptionUrl string       `json:"descriptionurl"`
+	Sha1           string       `json:"sha1"`
+	ExtMetadata    *ExtMetadata `json:"extmetadata"`
+}
+
+// Page represent page data response in Actions API.
+type Page struct {
+	PageID                int                       `json:"pageid,omitempty"`
+	Title                 string                    `json:"title,omitempty"`
+	Ns                    int                       `json:"ns,omitempty"`
+	WbEntityUsage         map[string]*WbEntityUsage `json:"wbentityusage,omitempty"`
+	PageProps             *PageProps                `json:"pageprops,omitempty"`
+	Watchers              int                       `json:"watchers"`
+	ContentModel          string                    `json:"contentmodel"`
+	PageLanguage          string                    `json:"pagelanguage"`
+	PageLanguageHTMLCode  string                    `json:"pagelanguagehtmlcode"`
+	PageLanguageDir       string                    `json:"pagelanguagedir"`
+	Touched               *time.Time                `json:"touched"`
+	LastRevID             int                       `json:"lastrevid"`
+	Length                int                       `json:"length"`
+	Missing               bool                      `json:"missing"`
+	Protection            []*Protection             `json:"protection"`
+	RestrictionTypes      []string                  `json:"restrictiontypes"`
+	FullURL               string                    `json:"fullurl"`
+	EditURL               string                    `json:"editurl"`
+	CanonicalURL          string                    `json:"canonicalurl"`
+	DisplayTitle          string                    `json:"displaytitle"`
+	Revisions             []*Revision               `json:"revisions"`
+	Redirects             []*Redirect               `json:"redirects"`
+	Categories            []*Category               `json:"categories"`
+	Templates             []*Template               `json:"templates"`
+	Flagged               *Flagged                  `json:"flagged"`
+	Original              *Image                    `json:"original,omitempty"`
+	Thumbnail             *Image                    `json:"thumbnail,omitempty"`
+	Imageinfo             []*ImageinfoElement       `json:"imageinfo"`
+	AnonymousContributors int                       `json:"anoncontributors"`
+	Contributors          []*User                   `json:"contributors"`
+}
+
+// WbEntityUsage represents wikibase entity usage for the page.
+type WbEntityUsage struct {
+	Aspects []string `json:"aspects,omitempty"`
+}
+
+// PageProps represents page properties response in Actions API.
+type PageProps struct {
+	WikiBaseItem string `json:"wikibase_item,omitempty"`
+}
+
+// SiteMatrix represents full sitematrix returned by Actions API.
+type SiteMatrix struct {
+	Count     int `json:"count"`
+	Languages map[string]*Language
+	Specials  []*Project `json:"specials"`
+}
+
+// ContributorsCount contains data about contributors to a page.
+type ContributorsCount struct {
+	AnonymousCount  int
+	RegisteredCount int
+	// If false, RegisteredCount is a lower bound.
+	AllRegisteredIncluded bool
+}
+
+// UnmarshalJSON unmarshal sitematrix especially to handle Languages that has dynamic fields.
+func (sm *SiteMatrix) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	sm.Languages = make(map[string]*Language)
+
+	for key, val := range raw {
+		switch key {
+		case "count":
+			if err := json.Unmarshal(val, &sm.Count); err != nil {
+				return err
+			}
+		case "specials":
+			if err := json.Unmarshal(val, &sm.Specials); err != nil {
+				return err
+			}
+		default:
+			var lang Language
+
+			if err := json.Unmarshal(val, &lang); err != nil {
+				return err
+			}
+			sm.Languages[key] = &lang
+		}
+	}
+
+	return nil
+}
+
+// Project represents a project form Site Matrix Actions API call.
+type Project struct {
+	URL      string `json:"url"`
+	DBName   string `json:"dbname"`
+	Code     string `json:"code"`
+	SiteName string `json:"sitename"`
+	Closed   bool   `json:"closed,omitempty"`
+}
+
+// Language represents a language form Site Matrix Actions API call.
+type Language struct {
+	Code      string     `json:"code"`
+	Name      string     `json:"name"`
+	Projects  []*Project `json:"site"`
+	Dir       string     `json:"dir"`
+	LocalName string     `json:"localname"`
+}
+
+// Namespace representation of namespace properties in Actions API.
+type Namespace struct {
+	ID            int    `json:"id"`
+	Case          string `json:"case"`
+	Name          string `json:"name"`
+	SubPages      bool   `json:"subpages"`
+	Canonical     string `json:"canonical"`
+	Content       bool   `json:"content"`
+	NonIncludable bool   `json:"nonincludable"`
+}
+
+// User actions API user representation.
+type User struct {
+	UserID           int           `json:"userid,omitempty"`
+	Name             string        `json:"name"`
+	EditCount        int           `json:"editcount,omitempty"`
+	Registration     *time.Time    `json:"registration,omitempty"`
+	Groups           []string      `json:"groups,omitempty"`
+	GroupMemberships []interface{} `json:"groupmemberships,omitempty"`
+	Emailable        bool          `json:"emailable,omitempty"`
+	Missing          bool          `json:"missing,omitempty"`
+}
+
+// PageHTML representation of concurrent HTML API response.
+type PageHTML struct {
+	Title    string `json:"title"`
+	Content  string `json:"content"`
+	Revision string `json:"revision,omitempty"`
+	Error    error  `json:"error"`
+}
+
+// Titles represents title properties for page summary.
+type Titles struct {
+	Canonical  string `json:"canonical"`
+	Normalized string `json:"normalized"`
+	Display    string `json:"display"`
+}
+
+// Titles represents image properties for page summary.
+type Image struct {
+	Source string `json:"source"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+// ContentUrls represents page URLs for page summary.
+type ContentUrls struct {
+	Page      string `json:"page"`
+	Revisions string `json:"revisions"`
+	Edit      string `json:"edit"`
+	Talk      string `json:"talk"`
+}
+
+// Coordinates represents place coordinates for page summary.
+type Coordinates struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
+// PageSummary the content for page summary returned by the REST API.
+type PageSummary struct {
+	Type              string                  `json:"type"`
+	Namespace         *Namespace              `json:"namespace"`
+	WikiBaseItem      string                  `json:"wikibase_item"`
+	Titles            *Titles                 `json:"titles"`
+	PageID            int                     `json:"pageid"`
+	Thumbnail         *Image                  `json:"thumbnail"`
+	OriginalImage     *Image                  `json:"originalimage"`
+	Lang              string                  `json:"lang"`
+	Dir               string                  `json:"dir"`
+	Revision          string                  `json:"revision"`
+	TID               string                  `json:"tid"`
+	Timestamp         *time.Time              `json:"timestamp"`
+	Description       string                  `json:"description"`
+	DescriptionSource string                  `json:"description_source"`
+	Coordinates       *Coordinates            `json:"coordinates"`
+	ContentUrls       map[string]*ContentUrls `json:"content_urls"`
+	Extract           string                  `json:"extract"`
+	ExtractHTML       string                  `json:"extract_html"`
+}
+
+// LiftWingScore represents model scores for a single revision.
+type LiftWingScore struct {
+	Prediction  bool                `json:"prediction"`
+	Probability *BooleanProbability `json:"probabilities"`
+}
+
+// Score is the output response for the LiftWing API.
+type Score struct {
+	Output *LiftWingScore `json:"output,omitempty"`
+	Error  *Error         `json:"error,omitempty"`
+}
+
+// BooleanProbability represents probability for boolean values.
+type BooleanProbability struct {
+	True  float64 `json:"true"`
+	False float64 `json:"false"`
+}
+
+// ReferenceNeedScore represents the response structure for the reference-need model
+type ReferenceNeedScore struct {
+	ReferenceNeedScore float64 `json:"reference_need_score"`
+}
+
+// ReferenceRiskScore represents the response structure for the reference-risk model.
+type ReferenceRiskScore struct {
+	ReferenceCount     int                 `json:"reference_count"`
+	SurvivalRatio      *SurvivalRatioData  `json:"survival_ratio,omitempty"`
+	ReferenceRiskScore float64             `json:"reference_risk_score"`
+	References         []*ReferenceDetails `json:"references,omitempty"`
+}
+
+// SurvivalRatioData represents the statistical survival ratio of references in a revision.
+type SurvivalRatioData struct {
+	Min    float64 `json:"min"`
+	Mean   float64 `json:"mean"`
+	Median float64 `json:"median"`
+}
+
+// ReferenceDetails provides detailed information about an individual reference.
+type ReferenceDetails struct {
+	URL            string          `json:"url,omitempty"`
+	DomainName     string          `json:"domain_name,omitempty"`
+	DomainMetadata *DomainMetadata `json:"domain_metadata,omitempty"`
+}
+
+// DomainMetadata contains additional metadata about a reference domain.
+type DomainMetadata struct {
+	PsLabelLocal  *string `json:"ps_label_local,omitempty"`
+	PsLabelEnwiki *string `json:"ps_label_enwiki,omitempty"`
+	SurvivalRatio float64 `json:"survival_ratio"`
+	PageCount     int     `json:"page_count"`
+	EditorsCount  int     `json:"editors_count"`
+}
+
+// WikibaseEntityResponse represents the response structure for  Special:EntityData API call.
+type WikibaseEntityResponse struct {
+	Entities map[string]*WikibaseEntity `json:"entities,omitempty"`
+	Success  int                        `json:"success,omitempty"`
+	Error    *Error                     `json:"error,omitempty"`
+}
+
+// WikibaseEntity represents a Wikibase entity.
+type WikibaseEntity struct {
+	Type         string                       `json:"type,omitempty"`
+	ID           string                       `json:"id,omitempty"`
+	Labels       map[string]*WikibaseValue    `json:"labels,omitempty"`
+	Descriptions map[string]*WikibaseValue    `json:"descriptions,omitempty"`
+	Aliases      map[string][]*WikibaseValue  `json:"aliases,omitempty"`
+	Claims       map[string][]*WikibaseClaim  `json:"claims,omitempty"`
+	Sitelinks    map[string]*WikibaseSitelink `json:"sitelinks,omitempty"`
+	LastRevID    int                          `json:"lastrevid,omitempty"`
+	Modified     string                       `json:"modified,omitempty"`
+	Title        string                       `json:"title,omitempty"`
+	PageID       int                          `json:"pageid,omitempty"`
+	Ns           int                          `json:"ns,omitempty"`
+	Missing      bool                         `json:"missing,omitempty"`
+}
+
+// WikibaseValue represents a localized value in Wikibase.
+type WikibaseValue struct {
+	Language string `json:"language,omitempty"`
+	Value    string `json:"value,omitempty"`
+}
+
+// WikibaseClaim represents a claim in Wikibase.
+type WikibaseClaim struct {
+	ID              string                     `json:"id,omitempty"`
+	Type            string                     `json:"type,omitempty"`
+	Rank            string                     `json:"rank,omitempty"`
+	MainSnak        *WikibaseSnak              `json:"mainsnak,omitempty"`
+	Qualifiers      map[string][]*WikibaseSnak `json:"qualifiers,omitempty"`
+	QualifiersOrder []string                   `json:"qualifiers-order,omitempty"`
+	References      []*WikibaseReference       `json:"references,omitempty"`
+}
+
+// WikibaseSnak represents a snak (property-value pair) in Wikibase.
+type WikibaseSnak struct {
+	SnakType  string             `json:"snaktype,omitempty"`
+	Property  string             `json:"property,omitempty"`
+	Hash      string             `json:"hash,omitempty"`
+	DataValue *WikibaseDataValue `json:"datavalue,omitempty"`
+	DataType  string             `json:"datatype,omitempty"`
+}
+
+// WikibaseDataValue represents the data value in a snak.
+type WikibaseDataValue struct {
+	Type  string      `json:"type,omitempty"`
+	Value interface{} `json:"value,omitempty"`
+}
+
+// WikibaseReference represents a reference for a claim.
+type WikibaseReference struct {
+	Hash       string                     `json:"hash,omitempty"`
+	Snaks      map[string][]*WikibaseSnak `json:"snaks,omitempty"`
+	SnaksOrder []string                   `json:"snaks-order,omitempty"`
+}
+
+// WikibaseSitelink represents a sitelink to a wiki page.
+type WikibaseSitelink struct {
+	Site   string   `json:"site,omitempty"`
+	Title  string   `json:"title,omitempty"`
+	Badges []string `json:"badges,omitempty"`
+	URL    string   `json:"url,omitempty"`
+}
+
+// NewAPI creates WFM API(s) client under the interface.
+func NewAPI(ops ...ClientOption) API {
+	return NewClient(ops...)
+}
+
+// ClientOption enables optional configuration for the client.
+type ClientOption func(*Client)
+
+// NewClient creates WMF API(s) client.
+func NewClient(ops ...ClientOption) *Client {
+	cl := &Client{
+		HTTPClient:         &http.Client{},
+		HTTPClientLiftWing: &http.Client{},
+		DefaultRetryAfter:  time.Second * 5,
+		EnableRetryAfter:   true,
+		DefaultURL:         "https://en.wikipedia.org",
+		LiftWingBaseURL:    "https://api.wikimedia.org/service/lw/inference/v1/models/",
+		DefaultDatabase:    "enwiki",
+		UserAgent:          "WME/2.0 (https://enterprise.wikimedia.com/; wme_mgmt@wikimedia.org)",
+	}
+
+	// Apply optional configurations
+	for _, opt := range ops {
+		opt(cl)
+	}
+
+	if cl.Tracer == nil {
+		defaultTrace(cl)
+	}
+
+	return cl
+}
+
+// Client all encompassing client for WFM API(s).
+type Client struct {
+	HTTPClient             *http.Client
+	HTTPClientLiftWing     *http.Client
+	DefaultURL             string
+	LiftWingBaseURL        string
+	OAuthToken             string
+	DefaultDatabase        string
+	UserAgent              string
+	DefaultRetryAfter      time.Duration
+	EnableRetryAfter       bool
+	projects               map[string]*Project
+	languages              map[string]*Language
+	projectslanguagesMutex sync.RWMutex
+	Tracer                 func(ctx context.Context, attributes map[string]string) (func(err error, msg string), context.Context)
+}
+
+func (c *Client) init(ctx context.Context) error {
+	if c.projects == nil || c.languages == nil {
+		lns, err := c.GetLanguages(ctx, c.DefaultDatabase)
+
+		if err != nil {
+			return fmt.Errorf("error initializing client: %w", err)
+		}
+
+		c.projectslanguagesMutex.Lock()
+		defer c.projectslanguagesMutex.Unlock()
+
+		c.projects = map[string]*Project{}
+		c.languages = map[string]*Language{}
+
+		for _, lng := range lns {
+			for _, prj := range lng.Projects {
+				c.languages[prj.DBName] = lng
+				c.projects[prj.DBName] = prj
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) getProjectURL(ctx context.Context, dtb string) (string, error) {
+	if dtb == c.DefaultDatabase {
+		return c.DefaultURL, nil
+	}
+
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	prj, err := c.GetProject(trx, dtb)
+
+	if err != nil {
+		end(err, "project not found")
+		return "", fmt.Errorf("couldn't fetch project data: %w", err)
+	}
+
+	end(nil, "project found")
+
+	return prj.URL, nil
+}
+
+func (c *Client) newRESTRequest(ctx context.Context, dtb string, path string, qry url.Values) (*http.Request, error) {
+	url, err := c.getProjectURL(ctx, dtb)
+
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/%s?%s", url, path, qry.Encode()), nil)
+
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", c.UserAgent)
+
+	return req, nil
+}
+
+func (c *Client) newActionsRequest(ctx context.Context, dtb string, bdy url.Values) (*http.Request, error) {
+	url, err := c.getProjectURL(ctx, dtb)
+
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/w/api.php", url), strings.NewReader(bdy.Encode()))
+
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", c.UserAgent)
+
+	return req, nil
+}
+
+func (c *Client) do(clt *http.Client, req *http.Request) (*http.Response, error) {
+	if clt == nil {
+		return nil, ErrHTTPClientNotFound
+	}
+
+	etr, _ := c.Tracer(req.Context(), map[string]string{"url": req.URL.String()})
+
+	res, err := clt.Do(req)
+
+	if err != nil {
+		etr(err, "request failed")
+		return nil, fmt.Errorf("wmf api call failed for url %s with error %v", req.URL.String(), err)
+	}
+
+	esu := res.StatusCode >= http.StatusBadGateway && res.StatusCode <= http.StatusGatewayTimeout
+
+	if c.EnableRetryAfter && (res.StatusCode == http.StatusTooManyRequests || esu) {
+		if est, _ := getErrorString(res); len(est) > 0 {
+			log.Printf("wmf api returned 502-504 or 429 for request %s with error %s\nabout to retry\n", req.URL.String(), est)
+		}
+
+		dly := c.DefaultRetryAfter
+
+		// Wait 300 seconds if WMF API returns 502-504 status code. WMF APIs can block the IP for 5 minutes
+		if esu {
+			dly = 300 * time.Second
+		}
+
+		rtv, err := getRetryAfterValue(res, dly)
+
+		if err != nil {
+			etr(err, "retry-after header not found")
+			return nil, err
+		}
+
+		time.Sleep(rtv)
+
+		return c.do(clt, req)
+	}
+
+	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusFound && res.StatusCode != http.StatusPartialContent {
+		dta, err := getErrorString(res)
+
+		if err != nil {
+			etr(err, "error response not found")
+			return nil, err
+		}
+
+		rer := fmt.Errorf("wmf api call returned status not 200, 206 or 302 for url %s with error %s", req.URL.String(), dta)
+		etr(rer, "error response")
+
+		return nil, rer
+	}
+
+	etr(nil, "request successful")
+	return res, nil
+}
+
+// GetAllPAges lists all pages in alphabetical order.
+// Not that default response includes only limited amount of properties.
+// Such as page ID, title and namespace.
+// In order to use other namespace than 0 use `ops ...func(*url.Values)` and update `apnamespace` property.
+func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page), ops ...func(*url.Values)) error {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	var err error
+	defer func() {
+		if err != nil {
+			end(err, "error fetching pages")
+		} else {
+			end(nil, "pages fetched")
+		}
+	}()
+
+	var rsp *Response
+	swg := new(sync.WaitGroup)
+	pgs := make(chan []*Page, 400000)
+
+	swg.Add(1)
+	go func() {
+		defer swg.Done()
+
+		for pgs := range pgs {
+			cbk(pgs)
+		}
+	}()
+
+	for {
+		bdy := url.Values{}
+		bdy.Set("action", "query")
+		bdy.Set("list", "allpages")
+		bdy.Set("apnamespace", "0")
+		bdy.Set("aplimit", "500")
+		bdy.Set("apfilterredir", "nonredirects")
+		bdy.Set("format", "json")
+		bdy.Set("formatversion", "2")
+
+		for _, opt := range ops {
+			opt(&bdy)
+		}
+
+		if rsp != nil {
+			for name, val := range rsp.Continue {
+				bdy.Set(name, val)
+			}
+		}
+
+		req, err := c.newActionsRequest(trx, dtb, bdy)
+
+		if err != nil {
+			return err
+		}
+
+		res, err := c.do(c.HTTPClient, req)
+
+		if err != nil {
+			return fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
+				req.Method,
+				req.Header,
+				bdy.Encode(),
+				err)
+		}
+
+		defer res.Body.Close()
+		rsp = new(Response)
+
+		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+			return err
+		}
+
+		if err := getResponseError(rsp); err != nil {
+			return fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+		}
+
+		pgs <- rsp.Query.AllPages
+
+		if len(rsp.Continue) == 0 {
+			break
+		}
+	}
+
+	close(pgs)
+	swg.Wait()
+
+	return nil
+}
+
+// GetPages gets a list of pages from actions API by titles (max batch limit is 50) and merges the request from continuation prop.
+// If you need to pass a specific property or update the API request use `ops ...func(*url.Values)` property.
+func (c *Client) GetPages(ctx context.Context, dtb string, tls []string, ops ...func(*url.Values)) (map[string]*Page, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	var err error
+	defer func() {
+		if err != nil {
+			end(err, "error fetching pages")
+		} else {
+			end(nil, "pages fetched")
+		}
+	}()
+
+	var rsp *Response
+	pgs := map[string]*Page{}
+	nls := map[string]string{}
+	cfg := func(c *mergo.Config) {
+		c.AppendSlice = true
+	}
+
+	for {
+		bdy := url.Values{}
+		bdy.Set("action", "query")
+		bdy.Set("prop", "info|revisions|wbentityusage|pageprops|redirects|flagged|pageimages")
+		bdy.Set("rvprop", "comment|content|ids|timestamp|tags|user|userid|flags")
+		bdy.Set("piprop", "thumbnail|original")
+		bdy.Set("rvslots", "main")
+		bdy.Set("inprop", "displaytitle|protection|url|watchers")
+		bdy.Set("ppprop", "wikibase_item")
+		bdy.Set("redirects", "1")
+		bdy.Set("titles", strings.Join(tls, "|"))
+		bdy.Set("format", "json")
+		bdy.Set("formatversion", "2")
+		bdy.Set("rdlimit", "500")
+		bdy.Set("wbeulimit", "500")
+
+		if rsp != nil {
+			for name, val := range rsp.Continue {
+				bdy.Set(name, val)
+			}
+		}
+
+		for _, opt := range ops {
+			opt(&bdy)
+		}
+
+		req, err := c.newActionsRequest(trx, dtb, bdy)
+
+		if err != nil {
+			return nil, err
+		}
+
+		res, err := c.do(c.HTTPClient, req)
+
+		if err != nil {
+			return nil, err
+		}
+
+		defer res.Body.Close()
+		rsp = new(Response)
+
+		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+			return nil, err
+		}
+
+		if err := getResponseError(rsp); err != nil {
+			return nil, fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+		}
+
+		if rsp.Query != nil {
+			for _, nlz := range rsp.Query.Normalized {
+				nls[nlz.To] = nlz.From
+			}
+
+			for _, rdr := range rsp.Query.Redirects {
+				ttl, ok := nls[rdr.From]
+
+				if ok {
+					nls[rdr.To] = ttl
+				} else {
+					nls[rdr.To] = rdr.From
+				}
+			}
+
+			for _, page := range rsp.Query.Pages {
+				ttl, ok := nls[page.Title]
+
+				if !ok {
+					ttl = page.Title
+				}
+
+				if ppg := pgs[ttl]; ppg != nil {
+					if err := mergo.Merge(ppg, page, cfg); err != nil {
+						return nil, err
+					}
+				} else {
+					pgs[ttl] = page
+				}
+			}
+		}
+
+		if len(rsp.Continue) > 0 {
+			// this is handling the infinite loops case when we are using
+			// `rvlimit` property, cuz it will use `rvcontinue` to go through all revisions
+			delete(rsp.Continue, "rvcontinue")
+
+			// This is to handle infinite loops case when we are using
+			// `iilimit` property for commons.wikimedia.org.
+			// The response is malformed. It should not have `iistart` under `continue`
+			// https://phabricator.wikimedia.org/T377035 https://www.mediawiki.org/wiki/API:Continue
+			delete(rsp.Continue, "iistart")
+
+			if _, ok := rsp.Continue["continue"]; ok && len(rsp.Continue) == 1 {
+				break
+			}
+		}
+
+		if len(rsp.Continue) == 0 {
+			break
+		}
+	}
+
+	return pgs, nil
+}
+
+// GetPage gets a single page from Actions API.
+// Request body can be updated using `ops ...func(*url.Values)` property.
+func (c *Client) GetPage(ctx context.Context, dtb string, ttl string, ops ...func(*url.Values)) (*Page, error) {
+	pgs, err := c.GetPages(ctx, dtb, []string{ttl}, ops...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if pge, ok := pgs[ttl]; ok {
+		return pge, nil
+	}
+
+	return nil, ErrPageNotFound
+}
+
+// GetPageHTML gets HTML of the page using page title.
+// Request query can be updated using `ops ...func(*url.Values)` property.
+func (c *Client) GetPageHTML(ctx context.Context, dtb string, ttl string, ops ...func(*url.Values)) (string, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb, "title": ttl})
+
+	qry := url.Values{}
+
+	for _, opt := range ops {
+		opt(&qry)
+	}
+
+	req, err := c.newRESTRequest(trx, dtb, fmt.Sprintf("w/rest.php/v1/page/%s/html", url.QueryEscape(strings.ReplaceAll(ttl, " ", "_"))), qry)
+
+	// Old restbase endpoint
+	// req, err := c.newRESTRequest(ctx, dtb, fmt.Sprintf("api/rest_v1/page/html/%s", url.QueryEscape(strings.ReplaceAll(ttl, " ", "_"))),
+
+	if err != nil {
+		end(err, "new request failed")
+		return "", err
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		end(err, "page html request failed")
+		return "", err
+	}
+
+	defer res.Body.Close()
+	dta, err := io.ReadAll(res.Body)
+
+	if err != nil {
+		end(err, "page html read failed")
+		return "", err
+	}
+
+	end(nil, "page html fetched")
+
+	return string(dta), nil
+}
+
+// GetPagesHTML makes concurrent requests to get HTML of the pages.
+// Parameter `mxc int` - is responsible for max amount concurrent requests.
+func (c *Client) GetPagesHTML(ctx context.Context, dtb string, tls []string, mxc int, ops ...func(*url.Values)) map[string]*PageHTML {
+	tln := len(tls)
+	que := make(chan string, tln)
+	out := make(chan *PageHTML, tln)
+
+	for i := 0; i < mxc; i++ {
+		go func() {
+			for ttl := range que {
+				cnt, err := c.GetPageHTML(ctx, dtb, ttl, ops...)
+
+				out <- &PageHTML{
+					Title:   ttl,
+					Content: cnt,
+					Error:   err,
+				}
+			}
+		}()
+	}
+
+	for _, ttl := range tls {
+		que <- ttl
+	}
+
+	close(que)
+	rsp := map[string]*PageHTML{}
+
+	for i := 0; i < tln; i++ {
+		phm := <-out
+		rsp[phm.Title] = phm
+	}
+
+	return rsp
+}
+
+// GetRevisionHTML gets HTML of the page using page revision Id.
+// Request query can be updated using `ops ...func(*url.Values)` property.
+func (c *Client) GetRevisionHTML(ctx context.Context, dtb string, rid string, ops ...func(*url.Values)) (string, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb, "revisionId": rid})
+
+	qry := url.Values{}
+
+	for _, opt := range ops {
+		opt(&qry)
+	}
+
+	req, err := c.newRESTRequest(trx, dtb, fmt.Sprintf("w/rest.php/v1/revision/%s/html", url.QueryEscape(rid)), qry)
+
+	if err != nil {
+		end(err, "new request failed")
+		return "", err
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		end(err, "page html request failed")
+		return "", err
+	}
+
+	defer res.Body.Close()
+	dta, err := io.ReadAll(res.Body)
+
+	if err != nil {
+		end(err, "page html read failed")
+		return "", err
+	}
+
+	end(nil, "page html fetched")
+
+	return string(dta), nil
+}
+
+// GetRevisionsHTML makes concurrent requests to get HTML of the pages.
+// Parameter `mxc int` - is responsible for max amount concurrent requests.
+func (c *Client) GetRevisionsHTML(ctx context.Context, dtb string, rvs []string, mxc int, ops ...func(*url.Values)) map[string]*PageHTML {
+	aln := len(rvs)
+	que := make(chan string, aln)
+	out := make(chan *PageHTML, aln)
+
+	for i := 0; i < mxc; i++ {
+		go func() {
+			for rid := range que {
+				cnt, err := c.GetRevisionHTML(ctx, dtb, rid, ops...)
+
+				out <- &PageHTML{
+					Revision: rid,
+					Content:  cnt,
+					Error:    err,
+				}
+			}
+		}()
+	}
+
+	for _, rid := range rvs {
+		que <- rid
+	}
+
+	close(que)
+	rsp := map[string]*PageHTML{}
+
+	for i := 0; i < aln; i++ {
+		phm := <-out
+		rsp[phm.Revision] = phm
+	}
+
+	return rsp
+}
+
+func (c *Client) GetPageByRevision(ctx context.Context, database string, revid int, ops ...func(*url.Values)) (*Page, error) {
+	bdy := url.Values{}
+	bdy.Set("action", "query")
+	bdy.Set("revids", strconv.Itoa(revid))
+	bdy.Set("format", "json")
+	bdy.Set("formatversion", "2")
+	for _, opt := range ops {
+		opt(&bdy)
+	}
+
+	rsp, err := c.sendRequest(ctx, database, bdy)
+	if err != nil {
+		return nil, err
+	}
+
+	return rsp.Query.Pages[0], nil
+}
+
+func (c *Client) sendRequest(ctx context.Context, database string, args url.Values) (*Response, error) {
+	req, err := c.newActionsRequest(ctx, database, args)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+	if err != nil {
+		return nil, fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
+			req.Method,
+			req.Header,
+			args.Encode(),
+			err)
+	}
+
+	defer res.Body.Close()
+	rsp := new(Response)
+
+	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+		return nil, fmt.Errorf("error decoding into JSON: %w", err)
+	}
+
+	if err := getResponseError(rsp); err != nil {
+		return nil, fmt.Errorf("error returned by WMF - %s:%v", http.StatusText(res.StatusCode), err)
+	}
+
+	if len(rsp.Query.Pages) > 0 {
+		return rsp, nil
+	}
+
+	return nil, fmt.Errorf("page not found")
+}
+
+func (c *Client) GetAllRevisions(ctx context.Context, database string, pageid int, ops ...func(*url.Values)) ([]*Revision, error) {
+	var rsp *Response
+
+	var revs []*Revision
+	for {
+		bdy := url.Values{}
+		bdy.Set("action", "query")
+		bdy.Set("prop", "revisions")
+		bdy.Set("pageids", strconv.Itoa(pageid))
+		bdy.Set("rvlimit", "500")
+		bdy.Set("rvorder", "older")
+		bdy.Set("rvprop", "ids|user|timestamp")
+		bdy.Set("format", "json")
+		bdy.Set("formatversion", "2")
+
+		for _, opt := range ops {
+			opt(&bdy)
+		}
+
+		if rsp != nil {
+			for name, val := range rsp.Continue {
+				bdy.Set(name, val)
+			}
+		}
+
+		req, err := c.newActionsRequest(ctx, database, bdy)
+
+		if err != nil {
+			return nil, fmt.Errorf("error creating request: %w", err)
+		}
+
+		res, err := c.do(c.HTTPClient, req)
+
+		if err != nil {
+			return nil, fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
+				req.Method,
+				req.Header,
+				bdy.Encode(),
+				err)
+		}
+
+		defer res.Body.Close()
+		rsp = new(Response)
+
+		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+			return nil, fmt.Errorf("error decoding into JSON: %w", err)
+		}
+
+		if err := getResponseError(rsp); err != nil {
+			return nil, fmt.Errorf("error returned by WMF - %s:%v", http.StatusText(res.StatusCode), err)
+		}
+
+		if len(rsp.Query.Pages) > 0 {
+			page := rsp.Query.Pages[0]
+			revs = append(revs, page.Revisions...)
+		}
+
+		if len(rsp.Continue) == 0 {
+			break
+		}
+	}
+
+	return revs, nil
+}
+
+// GetPageSummary gets summary of the page using page title.
+// Request query can be updated using `ops ...func(*url.Values)` property.
+func (c *Client) GetPageSummary(ctx context.Context, dtb string, ttl string, ops ...func(*url.Values)) (*PageSummary, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb, "title": ttl})
+
+	qry := url.Values{}
+
+	for _, opt := range ops {
+		opt(&qry)
+	}
+
+	req, err := c.newRESTRequest(trx, dtb, fmt.Sprintf("api/rest_v1/page/summary/%s", url.QueryEscape(strings.ReplaceAll(ttl, " ", "_"))), qry)
+
+	if err != nil {
+		end(err, "new request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		end(err, "page summary request failed")
+		return nil, err
+	}
+
+	defer res.Body.Close()
+	psm := new(PageSummary)
+
+	if err := json.NewDecoder(res.Body).Decode(psm); err != nil {
+		end(err, "page summary decode failed")
+		return nil, err
+	}
+
+	end(nil, "page summary fetched")
+
+	return psm, nil
+}
+
+// GetLanguages gets a list of languages from the Actions API using Site Matrix api.
+// If you need to pass a specific property or update the API request use `ops ...func(*url.Values)` property.
+func (c *Client) GetLanguages(ctx context.Context, dtb string, ops ...func(*url.Values)) ([]*Language, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	bdy := url.Values{}
+	bdy.Set("action", "sitematrix")
+	bdy.Set("format", "json")
+	bdy.Set("formatversion", "2")
+
+	for _, opt := range ops {
+		opt(&bdy)
+	}
+
+	req, err := c.newActionsRequest(trx, dtb, bdy)
+
+	if err != nil {
+		end(err, "new request failed")
+		return nil, fmt.Errorf("error creating request for languages, %w", err)
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		end(err, "languages request failed")
+		return nil, fmt.Errorf("error making request for languages, %w", err)
+	}
+
+	defer res.Body.Close()
+	rsp := new(Response)
+
+	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+		end(err, "decoding response failed")
+		return nil, fmt.Errorf("error decoding response for languages, %w", err)
+	}
+
+	if err = getResponseError(rsp); err != nil {
+		ser := fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+		end(ser, "response error")
+		return nil, fmt.Errorf("error fetching languages, %w", ser)
+	}
+
+	lns := []*Language{}
+	for _, lng := range rsp.SiteMatrix.Languages {
+		lns = append(lns, lng)
+	}
+
+	for _, prj := range rsp.SiteMatrix.Specials {
+		// Include certain special projects, such as commons, wikidata.
+		if prj.DBName == "commonswiki" || prj.DBName == "wikidatawiki" {
+			lns = append(lns, &Language{Projects: []*Project{prj}})
+		}
+	}
+
+	end(nil, "languages fetched")
+
+	return lns, nil
+}
+
+// GetLanguage gets a single language using a database name.
+func (c *Client) GetLanguage(ctx context.Context, dtb string) (*Language, error) {
+	if err := c.init(ctx); err != nil {
+		return nil, err
+	}
+
+	c.projectslanguagesMutex.RLock()
+	defer c.projectslanguagesMutex.RUnlock()
+
+	if lng, ok := c.languages[dtb]; ok {
+		return lng, nil
+	}
+
+	return nil, ErrLanguageNotFound
+}
+
+// GetProjects gets an array of all projects using database name.
+func (c *Client) GetProjects(ctx context.Context, dtb string) ([]*Project, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	if err := c.init(trx); err != nil {
+		end(err, "init failed")
+		return nil, err
+	}
+
+	prl := []*Project{}
+
+	c.projectslanguagesMutex.RLock()
+	defer c.projectslanguagesMutex.RUnlock()
+
+	if dtb == c.DefaultDatabase {
+		for _, prj := range c.projects {
+			prl = append(prl, prj)
+		}
+
+		return prl, nil
+	}
+
+	lgs, err := c.GetLanguages(trx, dtb)
+
+	if err != nil {
+		end(err, "languages fetch failed")
+		return nil, err
+	}
+
+	for _, lng := range lgs {
+		prl = append(prl, lng.Projects...)
+	}
+
+	end(nil, "projects fetched")
+
+	return prl, nil
+}
+
+// GetProject gets a single project using a database name.
+func (c *Client) GetProject(ctx context.Context, dtb string) (*Project, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	if err := c.init(trx); err != nil {
+		end(err, "init failed")
+		return nil, err
+	}
+
+	c.projectslanguagesMutex.RLock()
+	defer c.projectslanguagesMutex.RUnlock()
+
+	if prj, ok := c.projects[dtb]; ok {
+		return prj, nil
+	}
+
+	end(ErrProjectNotFound, "project not found")
+
+	return nil, ErrProjectNotFound
+}
+
+// GetNamespaces returns a list of namespaces supported by the projects.
+// If you need to pass a specific property or update the API request use `ops ...func(*url.Values)` property.
+func (c *Client) GetNamespaces(ctx context.Context, dtb string, ops ...func(*url.Values)) ([]*Namespace, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	bdy := url.Values{}
+	bdy.Set("action", "query")
+	bdy.Set("meta", "siteinfo")
+	bdy.Set("siprop", "namespaces")
+	bdy.Set("format", "json")
+	bdy.Set("formatversion", "2")
+
+	for _, opt := range ops {
+		opt(&bdy)
+	}
+
+	req, err := c.newActionsRequest(trx, dtb, bdy)
+
+	if err != nil {
+		end(err, "new request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		end(err, "namespaces request failed")
+		return nil, err
+	}
+
+	defer res.Body.Close()
+	rsp := new(Response)
+
+	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+		end(err, "namespaces decode failed")
+		return nil, err
+	}
+
+	if err := getResponseError(rsp); err != nil {
+		end(err, "response error")
+		return nil, fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+	}
+
+	nss := []*Namespace{}
+
+	for _, nsp := range rsp.Query.Namespaces {
+		nss = append(nss, nsp)
+	}
+
+	end(nil, "namespaces fetched")
+
+	return nss, nil
+}
+
+// GetRandomPages returns a list of random article titles from a project. rnlimit should be between 1 to 500.
+// If you need to pass a specific property or update the API request use `ops ...func(*url.Values)` property.
+func (c *Client) GetRandomPages(ctx context.Context, dtb string, ops ...func(*url.Values)) ([]*Page, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	bdy := url.Values{}
+	bdy.Set("action", "query")
+	bdy.Set("format", "json")
+	bdy.Set("formatversion", "2")
+	bdy.Set("list", "random")
+	bdy.Set("rnfilterredir", "nonredirects")
+	bdy.Set("rnnamespace", "0")
+	bdy.Set("rnlimit", "1")
+
+	for _, opt := range ops {
+		opt(&bdy)
+	}
+
+	req, err := c.newActionsRequest(trx, dtb, bdy)
+
+	if err != nil {
+		end(err, "new request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		end(err, "random pages request failed")
+		return nil, err
+	}
+
+	defer res.Body.Close()
+	rsp := new(Response)
+
+	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+		end(err, "random pages decode failed")
+		return nil, err
+	}
+
+	if rsp.Error != nil {
+		ser := fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), errors.New(rsp.Error.Info))
+		end(ser, "response error")
+		return nil, ser
+	}
+
+	rns := append([]*Page{}, rsp.Query.Random...)
+
+	end(nil, "random pages fetched")
+
+	return rns, nil
+}
+
+// GetUsers gets a list of users using identifiers and database name.
+// If you need to pass a specific property or update the API request use `ops ...func(*url.Values)` property.
+func (c *Client) GetUsers(ctx context.Context, dtb string, ids []int, ops ...func(*url.Values)) (map[int]*User, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb})
+
+	uds := []string{}
+
+	for _, id := range ids {
+		uds = append(uds, strconv.Itoa(id))
+	}
+
+	bdy := url.Values{}
+	bdy.Add("action", "query")
+	bdy.Add("list", "users")
+	bdy.Add("usprop", "groups|editcount|groupmemberships|registration|emailable")
+	bdy.Add("ususerids", strings.Join(uds, "|"))
+	bdy.Add("format", "json")
+	bdy.Add("formatversion", "2")
+
+	for _, opt := range ops {
+		opt(&bdy)
+	}
+
+	req, err := c.newActionsRequest(trx, dtb, bdy)
+
+	if err != nil {
+		end(err, "new request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		end(err, "users request failed")
+		return nil, err
+	}
+
+	defer res.Body.Close()
+	rsp := new(Response)
+
+	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+		end(err, "users decode failed")
+		return nil, err
+	}
+
+	if err := getResponseError(rsp); err != nil {
+		ser := fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+		end(ser, "response error")
+		return nil, ser
+	}
+
+	uss := map[int]*User{}
+
+	for _, usr := range rsp.Query.Users {
+		uss[usr.UserID] = usr
+	}
+
+	end(nil, "users fetched")
+
+	return uss, nil
+}
+
+// GetUser gets a single user using identifiers and database name.
+// If you need to pass a specific property or update the API request use `ops ...func(*url.Values)` property.
+func (c *Client) GetUser(ctx context.Context, dtb string, id int, ops ...func(*url.Values)) (*User, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb, "id": strconv.Itoa(id)})
+	uss, err := c.GetUsers(trx, dtb, []int{id}, ops...)
+
+	if err != nil {
+		end(err, "users fetch failed")
+		return nil, err
+	}
+
+	if usr, ok := uss[id]; ok {
+		end(nil, "user fetched")
+		return usr, nil
+	}
+
+	end(ErrUserNotFound, "user not found")
+
+	return nil, ErrUserNotFound
+}
+
+// GetScore gets a single score using revision ID, language, model and project.
+func (c *Client) GetScore(ctx context.Context, rev int, lng string, prj string, mdl string) (*Score, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"revision": strconv.Itoa(rev), "language": lng, "project": prj, "model": mdl})
+
+	req, err := c.newLiftWingRequest(trx, rev, lng, prj, mdl)
+
+	if err != nil {
+		end(err, "new request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClientLiftWing, req)
+
+	if err != nil {
+		end(err, "score request failed")
+		return nil, err
+	}
+
+	defer res.Body.Close()
+
+	scr := &Score{}
+
+	if err := json.NewDecoder(res.Body).Decode(scr); err != nil {
+		end(err, "score decode failed")
+		return nil, err
+	}
+
+	end(nil, "score fetched")
+
+	return scr, nil
+}
+
+// GetReferenceNeedScore fetches the Reference Need Score for a given revision.
+// Returns a ReferenceNeedScore struct or an error if the request fails.
+func (c *Client) GetReferenceNeedScore(ctx context.Context, rev int, lng, prj string) (*ReferenceNeedScore, error) {
+	end, trx := c.Tracer(ctx, map[string]string{
+		"revision": strconv.Itoa(rev),
+		"language": lng,
+		"project":  prj,
+		"model":    "reference-need",
+	})
+
+	req, err := c.newLiftWingRequest(trx, rev, lng, prj, "reference-need")
+	if err != nil {
+		end(err, "new referenceneed request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClientLiftWing, req)
+	if err != nil {
+		end(err, "referenceneed score request failed")
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	var result ReferenceNeedScore
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		end(err, "referenceneed score decode failed")
+		return nil, err
+	}
+
+	end(nil, "referenceneed score fetched")
+	return &result, nil
+}
+
+// GetReferenceRiskScore fetches the Reference Risk Score for a given revision.
+// Returns a ReferenceRiskScore struct or an error if the request fails.
+func (c *Client) GetReferenceRiskScore(ctx context.Context, rev int, lng, prj string) (*ReferenceRiskScore, error) {
+	end, trx := c.Tracer(ctx, map[string]string{
+		"revision": strconv.Itoa(rev),
+		"language": lng,
+		"project":  prj,
+		"model":    "reference-risk",
+	})
+
+	req, err := c.newLiftWingRequest(trx, rev, lng, prj, "reference-risk")
+	if err != nil {
+		end(err, "new referencerisk request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClientLiftWing, req)
+	if err != nil {
+		end(err, "referencerisk score request failed")
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	var result ReferenceRiskScore
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		end(err, "referencerisk score decode failed")
+		return nil, err
+	}
+
+	end(nil, "referencerisk score fetched")
+	return &result, nil
+}
+
+// newLiftWingRequest constructs an HTTP request for the LiftWing models.
+func (c *Client) newLiftWingRequest(ctx context.Context, rev int, lng string, prj string, mdl string) (*http.Request, error) {
+
+	bdy := map[string]interface{}{
+		"rev_id": rev,
+		"lang":   lng,
+	}
+
+	// Add extended_output parameter for Reference Risk
+	if mdl == "referencerisk" {
+		bdy["extended_output"] = "true"
+	}
+
+	// Construct URL dynamically
+	url := c.getModelURL(prj, mdl)
+
+	jby, err := json.Marshal(bdy)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(jby))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.OAuthToken))
+	return req, nil
+}
+
+// getModelURL constructs the appropriate API URL based on the model.
+func (c *Client) getModelURL(prj, mdl string) string {
+	switch mdl {
+	case "revertrisk":
+		return fmt.Sprintf("%s%s-language-agnostic:predict", c.LiftWingBaseURL, mdl)
+	case "reference-risk", "reference-need":
+		return fmt.Sprintf("%s%s:predict", c.LiftWingBaseURL, mdl)
+	default:
+		return fmt.Sprintf("%s%s-%s:predict", c.LiftWingBaseURL, prj, mdl)
+	}
+}
+
+// DownloadFile downloads a file from Wikimedia Commons using the provided file full url path.
+// Optional ops can be used to set headers like Range or other request parameters.
+func (c *Client) DownloadFile(ctx context.Context, urlPath string, ops ...func(*http.Request)) ([]byte, error) {
+
+	return c.fileOperation(ctx, urlPath, http.MethodGet, ops...)
+}
+
+// HeadFile does a HEAD call for a file from Wikimedia Commons using the provided file full url path.
+func (c *Client) HeadFile(ctx context.Context, urlPath string, ops ...func(*http.Request)) ([]byte, error) {
+
+	return c.fileOperation(ctx, urlPath, http.MethodHead, ops...)
+}
+
+// fileOperation helper method to allow all operations on a wikimedia file.
+func (c *Client) fileOperation(ctx context.Context, urlPath string, method string, ops ...func(*http.Request)) ([]byte, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": "commonswiki"})
+	var err error
+	defer func() {
+		if err != nil {
+			end(err, "error downloading file")
+		} else {
+			end(nil, "file downloaded")
+		}
+	}()
+
+	parsedURL, err := url.Parse(urlPath)
+
+	if err != nil {
+		return nil, err
+	}
+
+	parsedURL.RawPath = parsedURL.EscapedPath()
+
+	req, err := http.NewRequestWithContext(trx, method, parsedURL.String(), nil)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// NewRequestWithContext decodes the url. We need to use the original url to retrieve the file.
+	req.URL = parsedURL
+	req.Header.Set("User-Agent", c.UserAgent)
+
+	for _, opt := range ops {
+		opt(req)
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer res.Body.Close()
+
+	dta, err := io.ReadAll(res.Body)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return dta, nil
+}
+
+func (c *Client) GetContributors(ctx context.Context, database string, pageid int, maxRegistered *int, ops ...func(*url.Values)) (pages []*Page, fetchedAll bool, err error) {
+	var previousResponse *Response
+	registeredSoFar := 0
+
+	for {
+		bdy := url.Values{}
+		bdy.Set("action", "query")
+		bdy.Set("prop", "contributors")
+		bdy.Set("pageids", strconv.Itoa(pageid))
+		bdy.Set("pclimit", "max")
+		bdy.Set("format", "json")
+		bdy.Set("formatversion", "2")
+		for _, opt := range ops {
+			opt(&bdy)
+		}
+
+		if previousResponse != nil {
+			for key, val := range previousResponse.Continue {
+				bdy.Set(key, val)
+			}
+		}
+
+		var err error
+		previousResponse, err = c.sendRequest(ctx, database, bdy)
+		if err != nil {
+			return nil, false, err
+		}
+
+		pages = append(pages, previousResponse.Query.Pages...)
+
+		if previousResponse.BatchComplete {
+			break
+		}
+
+		if maxRegistered != nil {
+			for _, page := range previousResponse.Query.Pages {
+				registeredSoFar += len(page.Contributors)
+			}
+			if registeredSoFar >= *maxRegistered {
+				break
+			}
+		}
+	}
+
+	return pages, previousResponse.BatchComplete, nil
+}
+
+func (c *Client) GetContributorsCount(ctx context.Context, database string, pageid int, maxRegistered *int, ops ...func(*url.Values)) (*ContributorsCount, error) {
+	pages, fetchedAll, err := c.GetContributors(ctx, database, pageid, maxRegistered, ops...)
+	if err != nil {
+		return nil, err
+	}
+
+	anon := 0
+	reg := 0
+	for _, page := range pages {
+		// Don't add anonymous, every page has the full count.
+		anon = page.AnonymousContributors
+
+		reg += len(page.Contributors)
+	}
+
+	return &ContributorsCount{
+		AnonymousCount:        anon,
+		RegisteredCount:       reg,
+		AllRegisteredIncluded: fetchedAll,
+	}, nil
+}
+
+// GetWikibaseEntity retrieves Wikibase entity data for a given entity ID.
+// The entity ID should be in the format Q123 for items or P123 for properties.
+// This method uses the Special:EntityData endpoint for entity retrieval.
+func (c *Client) GetWikibaseEntity(ctx context.Context, dtb string, entityID string, ops ...func(*url.Values)) (*WikibaseEntityResponse, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": dtb, "entityID": entityID})
+
+	var err error
+	defer func() {
+		if err != nil {
+			end(err, "error fetching wikibase entity")
+		} else {
+			end(nil, "wikibase entity fetched")
+		}
+	}()
+
+	path := fmt.Sprintf("wiki/Special:EntityData/%s.json", entityID)
+
+	// Handle optional parameters (though Special:EntityData has limited parameter support)
+	qry := url.Values{}
+	for _, opt := range ops {
+		opt(&qry)
+	}
+
+	req, err := c.newRESTRequest(trx, dtb, path, qry)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request for Wikibase entity, %w", err)
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "Not Found") {
+			return nil, ErrEntityNotFound
+		}
+		return nil, err
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusNotFound {
+		return nil, ErrEntityNotFound
+	}
+
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP error %d: %s", res.StatusCode, res.Status)
+	}
+
+	rsp := new(WikibaseEntityResponse)
+
+	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
+		return nil, fmt.Errorf("error decoding JSON from Wikidata: %w", err)
+	}
+
+	if rsp.Error != nil {
+		err = fmt.Errorf("wikibase entity API error: %s - %s", rsp.Error.Code, rsp.Error.Info)
+		return nil, err
+	}
+
+	if rsp.Entities != nil {
+		if entity, ok := rsp.Entities[entityID]; ok {
+			if entity.Missing {
+				err = ErrEntityNotFound
+				return nil, err
+			}
+		} else {
+			err = ErrEntityNotFound
+			return nil, err
+		}
+	} else {
+		err = ErrEntityNotFound
+		return nil, err
+	}
+
+	return rsp, nil
+}
+
+// GetWikidataEntityCreationDate retrieves the creation date for a given Wikidata entity.
+// The entityTitle should be in the format Q123 for items or P123 for properties.
+// Returns the timestamp of the first revision.
+func (c *Client) GetWikidataEntityCreationDate(ctx context.Context, entityTitle string) (*time.Time, error) {
+	end, trx := c.Tracer(ctx, map[string]string{"entityTitle": entityTitle})
+
+	var err error
+	defer func() {
+		if err != nil {
+			end(err, "error fetching wikidata entity creation date")
+		} else {
+			end(nil, "wikidata entity creation date fetched")
+		}
+	}()
+
+	// MediaWiki API call for first revision
+	qry := url.Values{}
+	qry.Set("action", "query")
+	qry.Set("prop", "revisions")
+	qry.Set("titles", entityTitle)
+	qry.Set("rvlimit", "1")
+	qry.Set("rvdir", "newer")
+	qry.Set("rvprop", "timestamp")
+	qry.Set("format", "json")
+
+	req, err := c.newRESTRequest(trx, "wikidatawiki", "w/api.php", qry)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request for creation date: %w", err)
+	}
+
+	res, err := c.do(c.HTTPClient, req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP error %d: %s", res.StatusCode, res.Status)
+	}
+
+	var response struct {
+		Query struct {
+			Pages map[string]*Page `json:"pages"`
+		} `json:"query"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("error decoding creation date response: %w", err)
+	}
+
+	// Extract the timestamp from the first revision
+	for _, page := range response.Query.Pages {
+		if page.Missing {
+			return nil, ErrEntityNotFound
+		}
+		if len(page.Revisions) > 0 && page.Revisions[0].Timestamp != nil {
+			return page.Revisions[0].Timestamp, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no revisions found for entity %s", entityTitle)
+}

@@ -1,0 +1,144 @@
+{
+    "entities": {
+        "Q2": {
+            "type": "item",
+            "id": "Q2",
+            "labels": {
+                "en": {
+                    "language": "en",
+                    "value": "Earth"
+                },
+                "es": {
+                    "language": "es",
+                    "value": "Tierra"
+                },
+                "fr": {
+                    "language": "fr",
+                    "value": "Terre"
+                }
+            },
+            "descriptions": {
+                "en": {
+                    "language": "en",
+                    "value": "third planet from the Sun in the Solar System"
+                },
+                "es": {
+                    "language": "es",
+                    "value": "tercer planeta del sistema solar"
+                }
+            },
+            "aliases": {
+                "en": [
+                    {
+                        "language": "en",
+                        "value": "Planet Earth"
+                    },
+                    {
+                        "language": "en",
+                        "value": "the Earth"
+                    }
+                ]
+            },
+            "claims": {
+                "P31": [
+                    {
+                        "id": "Q2$5e9c4c3f-4e5c-ef90-f9a5-ba8f4b9e9a2e",
+                        "type": "statement",
+                        "rank": "normal",
+                        "mainsnak": {
+                            "snaktype": "value",
+                            "property": "P31",
+                            "datavalue": {
+                                "type": "wikibase-entityid",
+                                "value": {
+                                    "entity-type": "item",
+                                    "numeric-id": 3504248,
+                                    "id": "Q3504248"
+                                }
+                            },
+                            "datatype": "wikibase-item"
+                        },
+                        "qualifiers": {},
+                        "qualifiers-order": [],
+                        "references": []
+                    }
+                ],
+                "P361": [
+                    {
+                        "id": "Q2$a3e3d5f9-4b5a-b123-c456-d7890e1f2g3h",
+                        "type": "statement",
+                        "rank": "normal",
+                        "mainsnak": {
+                            "snaktype": "value",
+                            "property": "P361",
+                            "datavalue": {
+                                "type": "wikibase-entityid",
+                                "value": {
+                                    "entity-type": "item",
+                                    "numeric-id": 544,
+                                    "id": "Q544"
+                                }
+                            },
+                            "datatype": "wikibase-item"
+                        },
+                        "qualifiers": {},
+                        "qualifiers-order": [],
+                        "references": [
+                            {
+                                "hash": "d5847b9b6032aa8b13dae3c2dfd9ed5d114d21b3",
+                                "snaks": {
+                                    "P143": [
+                                        {
+                                            "snaktype": "value",
+                                            "property": "P143",
+                                            "datavalue": {
+                                                "type": "wikibase-entityid",
+                                                "value": {
+                                                    "entity-type": "item",
+                                                    "numeric-id": 328,
+                                                    "id": "Q328"
+                                                }
+                                            },
+                                            "datatype": "wikibase-item"
+                                        }
+                                    ]
+                                },
+                                "snaks-order": [
+                                    "P143"
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            },
+            "sitelinks": {
+                "enwiki": {
+                    "site": "enwiki",
+                    "title": "Earth",
+                    "badges": [],
+                    "url": "https://en.wikipedia.org/wiki/Earth"
+                },
+                "eswiki": {
+                    "site": "eswiki",
+                    "title": "Tierra",
+                    "badges": [],
+                    "url": "https://es.wikipedia.org/wiki/Tierra"
+                },
+                "frwiki": {
+                    "site": "frwiki",
+                    "title": "Terre",
+                    "badges": [
+                        "Q17437796"
+                    ],
+                    "url": "https://fr.wikipedia.org/wiki/Terre"
+                }
+            },
+            "lastrevid": 2345678901,
+            "modified": "2024-10-15T12:34:56Z",
+            "title": "Q2",
+            "pageid": 123,
+            "ns": 0
+        }
+    },
+    "success": 1
+}

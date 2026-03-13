@@ -763,16 +763,21 @@ func (c *Client) newActionsRequest(ctx context.Context, dtb string, bdy url.Valu
 }
 
 func (c *Client) do(clt *http.Client, req *http.Request) (*http.Response, error) {
+	etr, trcCtx := c.Tracer(req.Context(), map[string]string{"url": req.URL.String()})
+	res, err := c.doUntraced(clt, req.WithContext(trcCtx))
+	etr(err, "failed request")
+
+	return res, err
+}
+
+func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response, error) {
 	if clt == nil {
 		return nil, ErrHTTPClientNotFound
 	}
 
-	etr, _ := c.Tracer(req.Context(), map[string]string{"url": req.URL.String()})
-
 	res, err := clt.Do(req)
 
 	if err != nil {
-		etr(err, "request failed")
 		return nil, fmt.Errorf("wmf api call failed for url %s with error %v", req.URL.String(), err)
 	}
 
@@ -793,31 +798,34 @@ func (c *Client) do(clt *http.Client, req *http.Request) (*http.Response, error)
 		rtv, err := getRetryAfterValue(res, dly)
 
 		if err != nil {
-			etr(err, "retry-after header not found")
 			return nil, err
 		}
 
 		time.Sleep(rtv)
 
-		return c.do(clt, req)
+		return c.doUntraced(clt, req)
 	}
 
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusFound && res.StatusCode != http.StatusPartialContent {
 		dta, err := getErrorString(res)
 
 		if err != nil {
-			etr(err, "error response not found")
 			return nil, err
 		}
 
 		rer := fmt.Errorf("wmf api call returned status not 200, 206 or 302 for url %s with error %s", req.URL.String(), dta)
-		etr(rer, "error response")
 
 		return nil, rer
 	}
 
-	etr(nil, "request successful")
 	return res, nil
+}
+
+func closeRespBody(c io.Closer) {
+	err := c.Close()
+	if err != nil {
+		log.Printf("error closing response body: %s\n", err)
+	}
 }
 
 // GetAllPAges lists all pages in alphabetical order.
@@ -876,7 +884,6 @@ func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page),
 		}
 
 		res, err := c.do(c.HTTPClient, req)
-
 		if err != nil {
 			return fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
 				req.Method,
@@ -884,10 +891,9 @@ func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page),
 				bdy.Encode(),
 				err)
 		}
+		defer closeRespBody(res.Body)
 
-		defer res.Body.Close()
 		rsp = new(Response)
-
 		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
 			return err
 		}
@@ -968,7 +974,7 @@ func (c *Client) GetPages(ctx context.Context, dtb string, tls []string, ops ...
 			return nil, err
 		}
 
-		defer res.Body.Close()
+		defer closeRespBody(res.Body)
 		rsp = new(Response)
 
 		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1073,15 +1079,13 @@ func (c *Client) GetPageHTML(ctx context.Context, dtb string, ttl string, ops ..
 	}
 
 	res, err := c.do(c.HTTPClient, req)
-
 	if err != nil {
 		end(err, "page html request failed")
 		return "", err
 	}
+	defer closeRespBody(res.Body)
 
-	defer res.Body.Close()
 	dta, err := io.ReadAll(res.Body)
-
 	if err != nil {
 		end(err, "page html read failed")
 		return "", err
@@ -1153,7 +1157,7 @@ func (c *Client) GetRevisionHTML(ctx context.Context, dtb string, rid string, op
 		return "", err
 	}
 
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 	dta, err := io.ReadAll(res.Body)
 
 	if err != nil {
@@ -1235,7 +1239,7 @@ func (c *Client) sendRequest(ctx context.Context, database string, args url.Valu
 			err)
 	}
 
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 	rsp := new(Response)
 
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1294,7 +1298,7 @@ func (c *Client) GetAllRevisions(ctx context.Context, database string, pageid in
 				err)
 		}
 
-		defer res.Body.Close()
+		defer closeRespBody(res.Body)
 		rsp = new(Response)
 
 		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1343,7 +1347,7 @@ func (c *Client) GetPageSummary(ctx context.Context, dtb string, ttl string, ops
 		return nil, err
 	}
 
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 	psm := new(PageSummary)
 
 	if err := json.NewDecoder(res.Body).Decode(psm); err != nil {
@@ -1378,15 +1382,13 @@ func (c *Client) GetLanguages(ctx context.Context, dtb string, ops ...func(*url.
 	}
 
 	res, err := c.do(c.HTTPClient, req)
-
 	if err != nil {
 		end(err, "languages request failed")
 		return nil, fmt.Errorf("error making request for languages, %w", err)
 	}
+	defer closeRespBody(res.Body)
 
-	defer res.Body.Close()
 	rsp := new(Response)
-
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
 		end(err, "decoding response failed")
 		return nil, fmt.Errorf("error decoding response for languages, %w", err)
@@ -1520,7 +1522,7 @@ func (c *Client) GetNamespaces(ctx context.Context, dtb string, ops ...func(*url
 		return nil, err
 	}
 
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 	rsp := new(Response)
 
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1570,13 +1572,12 @@ func (c *Client) GetRandomPages(ctx context.Context, dtb string, ops ...func(*ur
 	}
 
 	res, err := c.do(c.HTTPClient, req)
-
 	if err != nil {
 		end(err, "random pages request failed")
 		return nil, err
 	}
+	defer closeRespBody(res.Body)
 
-	defer res.Body.Close()
 	rsp := new(Response)
 
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1628,15 +1629,13 @@ func (c *Client) GetUsers(ctx context.Context, dtb string, ids []int, ops ...fun
 	}
 
 	res, err := c.do(c.HTTPClient, req)
-
 	if err != nil {
 		end(err, "users request failed")
 		return nil, err
 	}
+	defer closeRespBody(res.Body)
 
-	defer res.Body.Close()
 	rsp := new(Response)
-
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
 		end(err, "users decode failed")
 		return nil, err
@@ -1692,13 +1691,11 @@ func (c *Client) GetScore(ctx context.Context, rev int, lng string, prj string, 
 	}
 
 	res, err := c.do(c.HTTPClientLiftWing, req)
-
 	if err != nil {
 		end(err, "score request failed")
 		return nil, err
 	}
-
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 
 	scr := &Score{}
 
@@ -1733,7 +1730,7 @@ func (c *Client) GetReferenceNeedScore(ctx context.Context, rev int, lng, prj st
 		end(err, "referenceneed score request failed")
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 
 	var result ReferenceNeedScore
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
@@ -1766,7 +1763,7 @@ func (c *Client) GetReferenceRiskScore(ctx context.Context, rev int, lng, prj st
 		end(err, "referencerisk score request failed")
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 
 	var result ReferenceRiskScore
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
@@ -1874,8 +1871,7 @@ func (c *Client) fileOperation(ctx context.Context, urlPath string, method strin
 	if err != nil {
 		return nil, err
 	}
-
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 
 	dta, err := io.ReadAll(res.Body)
 
@@ -1887,6 +1883,9 @@ func (c *Client) fileOperation(ctx context.Context, urlPath string, method strin
 }
 
 func (c *Client) GetContributors(ctx context.Context, database string, pageid int, maxRegistered *int, ops ...func(*url.Values)) (pages []*Page, fetchedAll bool, err error) {
+	end, trx := c.Tracer(ctx, map[string]string{"database": database, "pageid": strconv.Itoa(pageid)})
+	defer end(err, "failed request for contributors")
+
 	var previousResponse *Response
 	registeredSoFar := 0
 
@@ -1908,8 +1907,7 @@ func (c *Client) GetContributors(ctx context.Context, database string, pageid in
 			}
 		}
 
-		var err error
-		previousResponse, err = c.sendRequest(ctx, database, bdy)
+		previousResponse, err = c.sendRequest(trx, database, bdy)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1990,8 +1988,7 @@ func (c *Client) GetWikibaseEntity(ctx context.Context, dtb string, entityID str
 		}
 		return nil, err
 	}
-
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 
 	if res.StatusCode == http.StatusNotFound {
 		return nil, ErrEntityNotFound
@@ -2064,7 +2061,7 @@ func (c *Client) GetWikidataEntityCreationDate(ctx context.Context, entityTitle 
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer closeRespBody(res.Body)
 
 	if res.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP error %d: %s", res.StatusCode, res.Status)

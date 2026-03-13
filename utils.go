@@ -47,7 +47,7 @@ func getRetryAfterValue(res *http.Response, def time.Duration) (time.Duration, e
 
 func getErrorString(res *http.Response) (string, error) {
 	dta, err := io.ReadAll(res.Body)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if err != nil {
 		return "", err

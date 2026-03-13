@@ -2095,7 +2095,7 @@ func (s *getAllRevisionsSuite) setUpApiServer() *httptest.Server {
 		w.WriteHeader(s.apiStatus)
 
 		bdy, err := io.ReadAll(r.Body)
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		if err != nil {
 			log.Fatalln("Failed to read request")
 		}

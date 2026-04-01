@@ -645,7 +645,7 @@ func NewClient(ops ...ClientOption) *Client {
 		HTTPClient:         &http.Client{},
 		HTTPClientLiftWing: &http.Client{},
 		DefaultRetryAfter:  time.Second * 5,
-		EnableRetryAfter:   true,
+		EnableRetryAfter:   false,
 		DefaultURL:         "https://en.wikipedia.org",
 		LiftWingBaseURL:    "https://api.wikimedia.org/service/lw/inference/v1/models/",
 		DefaultDatabase:    "enwiki",

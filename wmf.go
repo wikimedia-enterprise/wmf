@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"dario.cat/mergo"
+	"github.com/wikimedia-enterprise/log"
 )
 
 // ErrProjectNotFound appears when project was not found in the site matrix.
@@ -131,6 +131,7 @@ type ScoreGetter interface {
 	GetScore(ctx context.Context, rev int, lng string, prj string, mdl string) (*Score, error)
 	GetReferenceNeedScore(ctx context.Context, rev int, lng, prj string) (*ReferenceNeedScore, error)
 	GetReferenceRiskScore(ctx context.Context, rev int, lng, prj string) (*ReferenceRiskScore, error)
+	GetWikidataRevertRiskScore(ctx context.Context, rev int) (*WikidataRevertRiskScore, error)
 }
 
 // PageSummaryGetter interface to expose method that gets page summary for specific page title.
@@ -537,6 +538,12 @@ type ReferenceRiskScore struct {
 	References         []*ReferenceDetails `json:"references,omitempty"`
 }
 
+// WikidataRevertRiskScore represents the response structure for the revertrisk-wikidata model.
+type WikidataRevertRiskScore struct {
+	Prediction  bool                `json:"prediction"`
+	Probability *BooleanProbability `json:"probability,omitempty"`
+}
+
 // SurvivalRatioData represents the statistical survival ratio of references in a revision.
 type SurvivalRatioData struct {
 	Min    float64 `json:"min"`
@@ -645,7 +652,7 @@ func NewClient(ops ...ClientOption) *Client {
 		HTTPClient:         &http.Client{},
 		HTTPClientLiftWing: &http.Client{},
 		DefaultRetryAfter:  time.Second * 5,
-		EnableRetryAfter:   false,
+		EnableRetryAfter:   true,
 		DefaultURL:         "https://en.wikipedia.org",
 		LiftWingBaseURL:    "https://api.wikimedia.org/service/lw/inference/v1/models/",
 		DefaultDatabase:    "enwiki",
@@ -763,21 +770,16 @@ func (c *Client) newActionsRequest(ctx context.Context, dtb string, bdy url.Valu
 }
 
 func (c *Client) do(clt *http.Client, req *http.Request) (*http.Response, error) {
-	etr, trcCtx := c.Tracer(req.Context(), map[string]string{"url": req.URL.String()})
-	res, err := c.doUntraced(clt, req.WithContext(trcCtx))
-	etr(err, "failed request")
-
-	return res, err
-}
-
-func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response, error) {
 	if clt == nil {
 		return nil, ErrHTTPClientNotFound
 	}
 
+	etr, _ := c.Tracer(req.Context(), map[string]string{"url": req.URL.String()})
+
 	res, err := clt.Do(req)
 
 	if err != nil {
+		etr(err, "request failed")
 		return nil, fmt.Errorf("wmf api call failed for url %s with error %v", req.URL.String(), err)
 	}
 
@@ -785,7 +787,9 @@ func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response
 
 	if c.EnableRetryAfter && (res.StatusCode == http.StatusTooManyRequests || esu) {
 		if est, _ := getErrorString(res); len(est) > 0 {
-			log.Printf("wmf api returned 502-504 or 429 for request %s with error %s\nabout to retry\n", req.URL.String(), est)
+			log.Warn("wmf api returned 502-504 or 429, about to retry",
+				log.Any("url", req.URL.String()),
+				log.Any("error", est))
 		}
 
 		dly := c.DefaultRetryAfter
@@ -798,34 +802,31 @@ func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response
 		rtv, err := getRetryAfterValue(res, dly)
 
 		if err != nil {
+			etr(err, "retry-after header not found")
 			return nil, err
 		}
 
 		time.Sleep(rtv)
 
-		return c.doUntraced(clt, req)
+		return c.do(clt, req)
 	}
 
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusFound && res.StatusCode != http.StatusPartialContent {
 		dta, err := getErrorString(res)
 
 		if err != nil {
+			etr(err, "error response not found")
 			return nil, err
 		}
 
 		rer := fmt.Errorf("wmf api call returned status not 200, 206 or 302 for url %s with error %s", req.URL.String(), dta)
+		etr(rer, "error response")
 
 		return nil, rer
 	}
 
+	etr(nil, "request successful")
 	return res, nil
-}
-
-func closeRespBody(c io.Closer) {
-	err := c.Close()
-	if err != nil {
-		log.Printf("error closing response body: %s\n", err)
-	}
 }
 
 // GetAllPAges lists all pages in alphabetical order.
@@ -884,6 +885,7 @@ func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page),
 		}
 
 		res, err := c.do(c.HTTPClient, req)
+
 		if err != nil {
 			return fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
 				req.Method,
@@ -891,9 +893,10 @@ func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page),
 				bdy.Encode(),
 				err)
 		}
-		defer closeRespBody(res.Body)
 
+		defer res.Body.Close()
 		rsp = new(Response)
+
 		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
 			return err
 		}
@@ -974,7 +977,7 @@ func (c *Client) GetPages(ctx context.Context, dtb string, tls []string, ops ...
 			return nil, err
 		}
 
-		defer closeRespBody(res.Body)
+		defer res.Body.Close()
 		rsp = new(Response)
 
 		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1079,13 +1082,15 @@ func (c *Client) GetPageHTML(ctx context.Context, dtb string, ttl string, ops ..
 	}
 
 	res, err := c.do(c.HTTPClient, req)
+
 	if err != nil {
 		end(err, "page html request failed")
 		return "", err
 	}
-	defer closeRespBody(res.Body)
 
+	defer res.Body.Close()
 	dta, err := io.ReadAll(res.Body)
+
 	if err != nil {
 		end(err, "page html read failed")
 		return "", err
@@ -1157,7 +1162,7 @@ func (c *Client) GetRevisionHTML(ctx context.Context, dtb string, rid string, op
 		return "", err
 	}
 
-	defer closeRespBody(res.Body)
+	defer res.Body.Close()
 	dta, err := io.ReadAll(res.Body)
 
 	if err != nil {
@@ -1239,7 +1244,7 @@ func (c *Client) sendRequest(ctx context.Context, database string, args url.Valu
 			err)
 	}
 
-	defer closeRespBody(res.Body)
+	defer res.Body.Close()
 	rsp := new(Response)
 
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1298,7 +1303,7 @@ func (c *Client) GetAllRevisions(ctx context.Context, database string, pageid in
 				err)
 		}
 
-		defer closeRespBody(res.Body)
+		defer res.Body.Close()
 		rsp = new(Response)
 
 		if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1347,7 +1352,7 @@ func (c *Client) GetPageSummary(ctx context.Context, dtb string, ttl string, ops
 		return nil, err
 	}
 
-	defer closeRespBody(res.Body)
+	defer res.Body.Close()
 	psm := new(PageSummary)
 
 	if err := json.NewDecoder(res.Body).Decode(psm); err != nil {
@@ -1382,13 +1387,15 @@ func (c *Client) GetLanguages(ctx context.Context, dtb string, ops ...func(*url.
 	}
 
 	res, err := c.do(c.HTTPClient, req)
+
 	if err != nil {
 		end(err, "languages request failed")
 		return nil, fmt.Errorf("error making request for languages, %w", err)
 	}
-	defer closeRespBody(res.Body)
 
+	defer res.Body.Close()
 	rsp := new(Response)
+
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
 		end(err, "decoding response failed")
 		return nil, fmt.Errorf("error decoding response for languages, %w", err)
@@ -1522,7 +1529,7 @@ func (c *Client) GetNamespaces(ctx context.Context, dtb string, ops ...func(*url
 		return nil, err
 	}
 
-	defer closeRespBody(res.Body)
+	defer res.Body.Close()
 	rsp := new(Response)
 
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1572,12 +1579,13 @@ func (c *Client) GetRandomPages(ctx context.Context, dtb string, ops ...func(*ur
 	}
 
 	res, err := c.do(c.HTTPClient, req)
+
 	if err != nil {
 		end(err, "random pages request failed")
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
 
+	defer res.Body.Close()
 	rsp := new(Response)
 
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
@@ -1629,13 +1637,15 @@ func (c *Client) GetUsers(ctx context.Context, dtb string, ids []int, ops ...fun
 	}
 
 	res, err := c.do(c.HTTPClient, req)
+
 	if err != nil {
 		end(err, "users request failed")
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
 
+	defer res.Body.Close()
 	rsp := new(Response)
+
 	if err := json.NewDecoder(res.Body).Decode(rsp); err != nil {
 		end(err, "users decode failed")
 		return nil, err
@@ -1691,11 +1701,13 @@ func (c *Client) GetScore(ctx context.Context, rev int, lng string, prj string, 
 	}
 
 	res, err := c.do(c.HTTPClientLiftWing, req)
+
 	if err != nil {
 		end(err, "score request failed")
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
+
+	defer res.Body.Close()
 
 	scr := &Score{}
 
@@ -1730,7 +1742,7 @@ func (c *Client) GetReferenceNeedScore(ctx context.Context, rev int, lng, prj st
 		end(err, "referenceneed score request failed")
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
+	defer res.Body.Close()
 
 	var result ReferenceNeedScore
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
@@ -1763,7 +1775,7 @@ func (c *Client) GetReferenceRiskScore(ctx context.Context, rev int, lng, prj st
 		end(err, "referencerisk score request failed")
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
+	defer res.Body.Close()
 
 	var result ReferenceRiskScore
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
@@ -1773,6 +1785,57 @@ func (c *Client) GetReferenceRiskScore(ctx context.Context, rev int, lng, prj st
 
 	end(nil, "referencerisk score fetched")
 	return &result, nil
+}
+
+// GetWikidataRevertRiskScore fetches the language-agnostic revert-risk score for a given revision
+// from the LiftWing revertrisk-wikidata-wikidata model.
+func (c *Client) GetWikidataRevertRiskScore(ctx context.Context, rev int) (*WikidataRevertRiskScore, error) {
+	end, trx := c.Tracer(ctx, map[string]string{
+		"revision": strconv.Itoa(rev),
+		"model":    "revertrisk-wikidata",
+	})
+
+	req, err := c.newLiftWingRequest(trx, rev, "", "", "revertrisk-wikidata")
+	if err != nil {
+		end(err, "new revertrisk-wikidata request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClientLiftWing, req)
+	if err != nil {
+		end(err, "revertrisk-wikidata score request failed")
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	var raw struct {
+		ModelName    string `json:"model_name"`
+		ModelVersion string `json:"model_version"`
+		RevisionID   int    `json:"revision_id"`
+		Output       *struct {
+			Prediction  bool                `json:"prediction"`
+			Probability *BooleanProbability `json:"probabilities"`
+		} `json:"output"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+		end(err, "revertrisk-wikidata score decode failed")
+		return nil, err
+	}
+
+	if raw.Output == nil {
+		err := fmt.Errorf("revertrisk-wikidata: empty output for revision %d", rev)
+		end(err, "revertrisk-wikidata empty output")
+		return nil, err
+	}
+
+	result := &WikidataRevertRiskScore{
+		Prediction:  raw.Output.Prediction,
+		Probability: raw.Output.Probability,
+	}
+
+	end(nil, "revertrisk-wikidata score fetched")
+	return result, nil
 }
 
 // newLiftWingRequest constructs an HTTP request for the LiftWing models.
@@ -1813,6 +1876,8 @@ func (c *Client) getModelURL(prj, mdl string) string {
 	case "revertrisk":
 		return fmt.Sprintf("%s%s-language-agnostic:predict", c.LiftWingBaseURL, mdl)
 	case "reference-risk", "reference-need":
+		return fmt.Sprintf("%s%s:predict", c.LiftWingBaseURL, mdl)
+	case "revertrisk-wikidata":
 		return fmt.Sprintf("%s%s:predict", c.LiftWingBaseURL, mdl)
 	default:
 		return fmt.Sprintf("%s%s-%s:predict", c.LiftWingBaseURL, prj, mdl)
@@ -1871,7 +1936,8 @@ func (c *Client) fileOperation(ctx context.Context, urlPath string, method strin
 	if err != nil {
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
+
+	defer res.Body.Close()
 
 	dta, err := io.ReadAll(res.Body)
 
@@ -1883,9 +1949,6 @@ func (c *Client) fileOperation(ctx context.Context, urlPath string, method strin
 }
 
 func (c *Client) GetContributors(ctx context.Context, database string, pageid int, maxRegistered *int, ops ...func(*url.Values)) (pages []*Page, fetchedAll bool, err error) {
-	end, trx := c.Tracer(ctx, map[string]string{"database": database, "pageid": strconv.Itoa(pageid)})
-	defer end(err, "failed request for contributors")
-
 	var previousResponse *Response
 	registeredSoFar := 0
 
@@ -1907,7 +1970,8 @@ func (c *Client) GetContributors(ctx context.Context, database string, pageid in
 			}
 		}
 
-		previousResponse, err = c.sendRequest(trx, database, bdy)
+		var err error
+		previousResponse, err = c.sendRequest(ctx, database, bdy)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1988,7 +2052,8 @@ func (c *Client) GetWikibaseEntity(ctx context.Context, dtb string, entityID str
 		}
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
+
+	defer res.Body.Close()
 
 	if res.StatusCode == http.StatusNotFound {
 		return nil, ErrEntityNotFound
@@ -2061,7 +2126,7 @@ func (c *Client) GetWikidataEntityCreationDate(ctx context.Context, entityTitle 
 	if err != nil {
 		return nil, err
 	}
-	defer closeRespBody(res.Body)
+	defer res.Body.Close()
 
 	if res.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP error %d: %s", res.StatusCode, res.Status)

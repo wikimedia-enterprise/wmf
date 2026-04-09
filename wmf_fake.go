@@ -364,3 +364,7 @@ func (f *APIFake) GetWikibaseEntity(ctx context.Context, dtb, entityID string, o
 		Success: 1,
 	}, nil
 }
+
+func (f *APIFake) GetWikidataRevertRiskScore(ctx context.Context, rev int) (*WikidataRevertRiskScore, error) {
+	return &WikidataRevertRiskScore{}, nil
+}

@@ -113,6 +113,19 @@ const getWikidataCreationDateMissingResponse = `{
   }
 }`
 
+const wikidataRevertRiskResponse = `{
+  "model_name": "revertrisk-wikidata",
+  "model_version": "1.0.0",
+  "revision_id": 12345,
+  "output": {
+    "prediction": true,
+    "probabilities": {
+      "true": 0.8,
+      "false": 0.2
+    }
+  }
+}`
+
 //go:embed testdata/get_contributors_10025_page1.json
 var getContributorsResponse10025Page1 string
 
@@ -1591,6 +1604,15 @@ func createLiftWingAPIServer(sts int, pld string) *httptest.Server {
 		}
 	})
 
+	rtr.HandleFunc("/service/lw/inference/v1/models/revertrisk-wikidata:predict", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(sts)
+		if sts == http.StatusOK {
+			_, _ = w.Write([]byte(pld))
+		} else {
+			_, _ = w.Write([]byte("invalid status code"))
+		}
+	})
+
 	return httptest.NewServer(rtr)
 }
 
@@ -1735,6 +1757,20 @@ func TestGetScore(t *testing.T) {
 			mdl: "revertrisk",
 			lng: "en",
 			err: errors.New("400 Bad Request:invalidstatuscode"),
+		},
+		{
+			sts: http.StatusInternalServerError,
+			pld: "",
+			mdl: "revertrisk-wikidata",
+			lng: "en",
+			err: errors.New("500 Internal Server Error"),
+		},
+		{
+			sts: http.StatusInternalServerError,
+			pld: liftWingPayload,
+			mdl: "revertrisk-wikidata",
+			lng: "en",
+			err: errors.New("500 Internal Server Error"),
 		},
 	} {
 		suite.Run(t, testCase)
@@ -2606,6 +2642,64 @@ func TestGetWikidataEntityCreationDate(t *testing.T) {
 			entity:    "Q123",
 			sts:       http.StatusInternalServerError,
 			expectErr: errors.New("500"),
+		},
+	} {
+		suite.Run(t, testCase)
+	}
+}
+
+type getWikidataRevertRiskScoreTestSuite struct {
+	suite.Suite
+	ctx context.Context
+	srv *httptest.Server
+	clt *Client
+	sts int
+	pld string
+	err error
+}
+
+func (s *getWikidataRevertRiskScoreTestSuite) SetupSuite() {
+	s.ctx = context.Background()
+	s.srv = createLiftWingAPIServer(s.sts, s.pld)
+
+	s.clt = &Client{
+		LiftWingBaseURL:    s.srv.URL + "/service/lw/inference/v1/models/",
+		HTTPClientLiftWing: &http.Client{},
+		Tracer:             mockTracer,
+	}
+}
+
+func (s *getWikidataRevertRiskScoreTestSuite) TearDownSuite() {
+	s.srv.Close()
+}
+
+func (s *getWikidataRevertRiskScoreTestSuite) TestGetWikidataRevertRiskScore() {
+	res, err := s.clt.GetWikidataRevertRiskScore(s.ctx, 12345)
+
+	if s.err != nil {
+		s.Assert().Error(err)
+		return
+	}
+
+	s.Assert().NoError(err)
+	s.Assert().NotNil(res)
+	s.Assert().Equal(true, res.Prediction)
+	s.Assert().NotNil(res.Probability)
+	s.Assert().Equal(0.8, res.Probability.True)
+	s.Assert().Equal(0.2, res.Probability.False)
+}
+
+func TestGetWikidataRevertRiskScore(t *testing.T) {
+	for _, testCase := range []*getWikidataRevertRiskScoreTestSuite{
+		{
+			sts: http.StatusOK,
+			pld: wikidataRevertRiskResponse,
+			err: nil,
+		},
+		{
+			sts: http.StatusInternalServerError,
+			pld: "",
+			err: errors.New("500"),
 		},
 	} {
 		suite.Run(t, testCase)

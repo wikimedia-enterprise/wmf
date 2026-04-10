@@ -131,6 +131,7 @@ type ScoreGetter interface {
 	GetScore(ctx context.Context, rev int, lng string, prj string, mdl string) (*Score, error)
 	GetReferenceNeedScore(ctx context.Context, rev int, lng, prj string) (*ReferenceNeedScore, error)
 	GetReferenceRiskScore(ctx context.Context, rev int, lng, prj string) (*ReferenceRiskScore, error)
+	GetWikidataRevertRiskScore(ctx context.Context, rev int) (*WikidataRevertRiskScore, error)
 }
 
 // PageSummaryGetter interface to expose method that gets page summary for specific page title.
@@ -372,6 +373,12 @@ type ContributorsCount struct {
 	RegisteredCount int
 	// If false, RegisteredCount is a lower bound.
 	AllRegisteredIncluded bool
+}
+
+// WikidataRevertRiskScore represents the response structure for the revertrisk-wikidata model.
+type WikidataRevertRiskScore struct {
+	Prediction  bool                `json:"prediction"`
+	Probability *BooleanProbability `json:"probability,omitempty"`
 }
 
 // UnmarshalJSON unmarshal sitematrix especially to handle Languages that has dynamic fields.
@@ -1775,6 +1782,57 @@ func (c *Client) GetReferenceRiskScore(ctx context.Context, rev int, lng, prj st
 	return &result, nil
 }
 
+// GetWikidataRevertRiskScore fetches the language-agnostic revert-risk score for a given revision
+// from the LiftWing revertrisk-wikidata-wikidata model.
+func (c *Client) GetWikidataRevertRiskScore(ctx context.Context, rev int) (*WikidataRevertRiskScore, error) {
+	end, trx := c.Tracer(ctx, map[string]string{
+		"revision": strconv.Itoa(rev),
+		"model":    "revertrisk-wikidata",
+	})
+
+	req, err := c.newLiftWingRequest(trx, rev, "", "", "revertrisk-wikidata")
+	if err != nil {
+		end(err, "new revertrisk-wikidata request failed")
+		return nil, err
+	}
+
+	res, err := c.do(c.HTTPClientLiftWing, req)
+	if err != nil {
+		end(err, "revertrisk-wikidata score request failed")
+		return nil, err
+	}
+	defer closeRespBody(res.Body)
+
+	var raw struct {
+		ModelName    string `json:"model_name"`
+		ModelVersion string `json:"model_version"`
+		RevisionID   int    `json:"revision_id"`
+		Output       *struct {
+			Prediction  bool                `json:"prediction"`
+			Probability *BooleanProbability `json:"probabilities"`
+		} `json:"output"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+		end(err, "revertrisk-wikidata score decode failed")
+		return nil, err
+	}
+
+	if raw.Output == nil {
+		err := fmt.Errorf("revertrisk-wikidata: empty output for revision %d", rev)
+		end(err, "revertrisk-wikidata empty output")
+		return nil, err
+	}
+
+	result := &WikidataRevertRiskScore{
+		Prediction:  raw.Output.Prediction,
+		Probability: raw.Output.Probability,
+	}
+
+	end(nil, "revertrisk-wikidata score fetched")
+	return result, nil
+}
+
 // newLiftWingRequest constructs an HTTP request for the LiftWing models.
 func (c *Client) newLiftWingRequest(ctx context.Context, rev int, lng string, prj string, mdl string) (*http.Request, error) {
 
@@ -1813,6 +1871,8 @@ func (c *Client) getModelURL(prj, mdl string) string {
 	case "revertrisk":
 		return fmt.Sprintf("%s%s-language-agnostic:predict", c.LiftWingBaseURL, mdl)
 	case "reference-risk", "reference-need":
+		return fmt.Sprintf("%s%s:predict", c.LiftWingBaseURL, mdl)
+	case "revertrisk-wikidata":
 		return fmt.Sprintf("%s%s:predict", c.LiftWingBaseURL, mdl)
 	default:
 		return fmt.Sprintf("%s%s-%s:predict", c.LiftWingBaseURL, prj, mdl)

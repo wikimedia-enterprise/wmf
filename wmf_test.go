@@ -2705,3 +2705,100 @@ func TestGetWikidataRevertRiskScore(t *testing.T) {
 		suite.Run(t, testCase)
 	}
 }
+
+type getPagesByRevisionsSuite struct {
+	suite.Suite
+	ctx               context.Context
+	srv               *httptest.Server
+	clt               *Client
+	revids            []int
+	errorExpected     bool
+	database          string
+	apiResponseJson   string
+	apiResponseParsed *Response
+	apiStatus         int
+	expectedPageIds   []int
+}
+
+func (s *getPagesByRevisionsSuite) SetupSuite() {
+	s.srv = createActionsAPIServer(s.apiStatus, s.apiResponseJson)
+	s.database = "enwiki"
+	s.ctx = context.Background()
+	s.clt = &Client{
+		DefaultURL:      s.srv.URL,
+		DefaultDatabase: s.database,
+		HTTPClient:      &http.Client{},
+		Tracer:          mockTracer,
+	}
+
+	s.apiResponseParsed = new(Response)
+	_ = json.Unmarshal([]byte(s.apiResponseJson), s.apiResponseParsed)
+}
+
+func (s *getPagesByRevisionsSuite) TearDownSuite() {
+	s.srv.Close()
+}
+
+func (s *getPagesByRevisionsSuite) TestGetPagesByRevisions() {
+	pages, err := s.clt.GetPagesByRevisions(s.ctx, s.database, s.revids)
+
+	if s.errorExpected {
+		s.Assert().Error(err)
+		s.Assert().Nil(pages)
+		return
+	}
+
+	s.Assert().NoError(err)
+	s.Assert().Equal(len(pages), len(s.expectedPageIds))
+	for i, page := range pages {
+		s.Assert().Equal(page.PageID, s.expectedPageIds[i])
+	}
+}
+
+func TestGetPagesByRevisions(t *testing.T) {
+	for _, testCase := range []*getPagesByRevisionsSuite{
+		// Example: https://en.wikipedia.org/w/api.php?action=query&revids=143507357&format=json&formatversion=2
+		{
+			apiStatus: http.StatusOK,
+			apiResponseJson: `
+{
+  "batchcomplete": true,
+  "query": {
+    "pages": [
+      {
+        "pageid": 4187252,
+        "ns": 0,
+        "title": "Salvadoran Civil War"
+      },
+			{
+				"pageid": 4187253,
+				"ns": 0,
+				"title": "Salvadoran Civil War 2"
+			}
+    ]
+  }
+}`,
+			expectedPageIds: []int{4187252, 4187253},
+		},
+		// Example: https://en.wikipedia.org/w/api.php?action=query&revids=abc&format=json&formatversion=2
+		{
+			apiStatus: http.StatusOK,
+			apiResponseJson: `
+{
+  "error": {
+    "code": "badinteger",
+    "info": "Invalid value \"abc\" for integer parameter \"revids\".",
+    "docref": "See https://en.wikipedia.org/w/api.php for API usage. Subscribe to the mediawiki-api-announce mailing list at &lt;https://lists.wikimedia.org/postorius/lists/mediawiki-api-announce.lists.wikimedia.org/&gt; for notice of API deprecations and breaking changes."
+  },
+  "servedby": "mw-api-ext.eqiad.main-846b9fd56-vlcnp"
+}`,
+			errorExpected: true,
+		},
+		{
+			apiStatus:     http.StatusInternalServerError,
+			errorExpected: true,
+		},
+	} {
+		suite.Run(t, testCase)
+	}
+}

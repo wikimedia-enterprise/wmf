@@ -265,6 +265,7 @@ type Revision struct {
 	User      string     `json:"user"`
 	UserID    int        `json:"userid"`
 	Minor     bool       `json:"minor"`
+	Size      int        `json:"size"`
 	Timestamp *time.Time `json:"timestamp"`
 	Slots     *Slots     `json:"slots"`
 	Comment   string     `json:"comment"`
@@ -1062,6 +1063,35 @@ func (c *Client) GetPage(ctx context.Context, dtb string, ttl string, ops ...fun
 	}
 
 	return nil, ErrPageNotFound
+}
+
+// GetPagesByRevisions retrieves pages by revision IDs.
+// Parameter `revids []int` - is responsible for revision IDs.
+// Request query can be updated using `ops ...func(*url.Values)` property.
+func (c *Client) GetPagesByRevisions(ctx context.Context, database string, revids []int, ops ...func(*url.Values)) ([]*Page, error) {
+	rds := []string{}
+
+	for _, rid := range revids {
+		rds = append(rds, strconv.Itoa(rid))
+	}
+
+	bdy := url.Values{}
+	bdy.Set("action", "query")
+	bdy.Set("revids", strings.Join(rds, "|"))
+	bdy.Set("format", "json")
+	bdy.Set("formatversion", "2")
+
+	for _, opt := range ops {
+		opt(&bdy)
+	}
+
+	rsp, err := c.sendRequest(ctx, database, bdy)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return rsp.Query.Pages, nil
 }
 
 // GetPageHTML gets HTML of the page using page title.

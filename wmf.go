@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"dario.cat/mergo"
+	"github.com/avast/retry-go/v4"
 )
 
 // ErrProjectNotFound appears when project was not found in the site matrix.
@@ -653,6 +654,7 @@ func NewClient(ops ...ClientOption) *Client {
 		HTTPClient:         &http.Client{},
 		HTTPClientLiftWing: &http.Client{},
 		DefaultRetryAfter:  time.Second * 5,
+		MaxRetryAfter:      time.Second * 300,
 		EnableRetryAfter:   false,
 		DefaultURL:         "https://en.wikipedia.org",
 		LiftWingBaseURL:    "https://api.wikimedia.org/service/lw/inference/v1/models/",
@@ -674,19 +676,26 @@ func NewClient(ops ...ClientOption) *Client {
 
 // Client all encompassing client for WFM API(s).
 type Client struct {
-	HTTPClient             *http.Client
-	HTTPClientLiftWing     *http.Client
-	DefaultURL             string
-	LiftWingBaseURL        string
-	OAuthToken             string
-	DefaultDatabase        string
-	UserAgent              string
-	DefaultRetryAfter      time.Duration
-	EnableRetryAfter       bool
+	HTTPClient         *http.Client
+	HTTPClientLiftWing *http.Client
+	DefaultURL         string
+	LiftWingBaseURL    string
+	OAuthToken         string
+	DefaultDatabase    string
+	UserAgent          string
+	DefaultRetryAfter  time.Duration
+	MaxRetryAfter      time.Duration
+	ExponentialBackOff bool
+	EnableRetryAfter   bool
+	// Set MaxAttempts to 0 for "unlimited".
+	MaxAttempts            uint
 	projects               map[string]*Project
 	languages              map[string]*Language
 	projectslanguagesMutex sync.RWMutex
 	Tracer                 func(ctx context.Context, attributes map[string]string) (func(err error, msg string), context.Context)
+
+	// retryHooks are only available for tests, to mock the retry timer.
+	retryHooks []retry.Option
 }
 
 func (c *Client) init(ctx context.Context) error {
@@ -771,11 +780,52 @@ func (c *Client) newActionsRequest(ctx context.Context, dtb string, bdy url.Valu
 }
 
 func (c *Client) do(clt *http.Client, req *http.Request) (*http.Response, error) {
-	etr, trcCtx := c.Tracer(req.Context(), map[string]string{"url": req.URL.String()})
-	res, err := c.doUntraced(clt, req.WithContext(trcCtx))
-	etr(err, "failed request")
+	end, trcCtx := c.Tracer(req.Context(), map[string]string{"url": req.URL.String()})
+	retryOpts := []retry.Option{
+		retry.Attempts(c.MaxAttempts),
+		retry.Delay(c.DefaultRetryAfter),
+		retry.Context(trcCtx),
+		retry.DelayType(func(attempt uint, err error, config *retry.Config) time.Duration {
+			var rae *RetryAfterError
+			if errors.As(err, &rae) && rae.RetryAfter > 0 {
+				return rae.RetryAfter
+			}
+
+			delay := c.DefaultRetryAfter
+			if c.ExponentialBackOff {
+				delay = retry.BackOffDelay(attempt, err, config)
+			}
+
+			// Note: we apply the max delay manually here, instead of using retry.MaxDelay.
+			// Otherwise retry.MaxDelay could cap WMF's preferred Retry-After.
+			if c.MaxRetryAfter > 0 && delay > c.MaxRetryAfter {
+				return c.MaxRetryAfter
+			}
+
+			return delay
+		}),
+	}
+	retryOpts = append(retryOpts, c.retryHooks...)
+
+	res, err := retry.DoWithData(
+		func() (*http.Response, error) { return c.doUntraced(clt, req.WithContext(trcCtx)) },
+		retryOpts...,
+	)
+	end(err, "failed request")
 
 	return res, err
+}
+
+type RetryAfterError struct {
+	Err        error
+	RetryAfter time.Duration
+}
+
+func (e *RetryAfterError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("retry after %v: %v", e.RetryAfter, e.Err)
+	}
+	return e.Err.Error()
 }
 
 func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response, error) {
@@ -784,46 +834,44 @@ func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response
 	}
 
 	res, err := clt.Do(req)
-
 	if err != nil {
-		return nil, fmt.Errorf("wmf api call failed for url %s with error %v", req.URL.String(), err)
+		return nil, retry.Unrecoverable(fmt.Errorf("wmf api call failed for url %s with error %w", req.URL.String(), err))
 	}
 
 	esu := res.StatusCode >= http.StatusBadGateway && res.StatusCode <= http.StatusGatewayTimeout
 
 	if c.EnableRetryAfter && (res.StatusCode == http.StatusTooManyRequests || esu) {
-		if est, _ := getErrorString(res); len(est) > 0 {
-			log.Printf("wmf api returned 502-504 or 429 for request %s with error %s\nabout to retry\n", req.URL.String(), est)
+		var errorString string
+		if errorString, _ = getErrorString(res); len(errorString) > 0 {
+			log.Printf("wmf api returned 502-504 or 429 for request %s with error %s\nabout to retry\n", req.URL.String(), errorString)
 		}
 
-		dly := c.DefaultRetryAfter
-
-		// Wait 300 seconds if WMF API returns 502-504 status code. WMF APIs can block the IP for 5 minutes
-		if esu {
-			dly = 300 * time.Second
-		}
-
-		rtv, err := getRetryAfterValue(res, dly)
-
+		rtv, err := getRetryAfterValue(res)
 		if err != nil {
-			return nil, err
+			return nil, retry.Unrecoverable(fmt.Errorf("error retrieving Retry-After value: %w", err))
 		}
 
-		time.Sleep(rtv)
+		if rtv != nil {
+			return nil, &RetryAfterError{Err: err, RetryAfter: *rtv}
+		}
 
-		return c.doUntraced(clt, req)
+		if esu {
+			// Wait 300 seconds if WMF API returns 502-504 status code. WMF APIs can block the IP for 5 minutes
+			return nil, &RetryAfterError{Err: err, RetryAfter: 300 * time.Second}
+		}
+
+		// Default behavior, respecting clt.ExponentialBackOff and clt.DefaultRetryAfter
+		return nil, errors.New(errorString)
 	}
 
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusFound && res.StatusCode != http.StatusPartialContent {
 		dta, err := getErrorString(res)
-
 		if err != nil {
-			return nil, err
+			return nil, retry.Unrecoverable(err)
 		}
 
 		rer := fmt.Errorf("wmf api call returned status not 200, 206 or 302 for url %s with error %s", req.URL.String(), dta)
-
-		return nil, rer
+		return nil, retry.Unrecoverable(rer)
 	}
 
 	return res, nil

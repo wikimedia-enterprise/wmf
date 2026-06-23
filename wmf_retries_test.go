@@ -113,6 +113,20 @@ func (c *clientTestSuite) TestRecoversOnThirdAttempt() {
 	c.Equal(expectedDelays, c.timer.delays)
 }
 
+func (c *clientTestSuite) TestRecoversOnThirdAttemptPOST() {
+	c.req.Method = http.MethodPost
+	c.mockTransport.Return429(c.req).Twice()
+	c.mockTransport.Return200(c.req).Once()
+
+	res, err := c.client.do(c.client.HTTPClient, c.req)
+
+	c.NoError(err)
+	c.Equal(http.StatusOK, res.StatusCode)
+
+	expectedDelays := []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	c.Equal(expectedDelays, c.timer.delays)
+}
+
 func (c *clientTestSuite) TestFailsAfterMaxAttempts() {
 	c.client.MaxAttempts = 2
 
@@ -142,6 +156,22 @@ func (c *clientTestSuite) TestRespectsRetryAfterHeader() {
 	c.Equal(http.StatusOK, res.StatusCode)
 
 	expectedDelays := []time.Duration{5 * time.Second}
+	c.Equal(expectedDelays, c.timer.delays)
+}
+
+func (c *clientTestSuite) TestDefault300SecondsOn502() {
+	c.mockTransport.On("RoundTrip", c.req).Return(&http.Response{
+		StatusCode: http.StatusBadGateway,
+		Body:       io.NopCloser(bytes.NewBufferString("")),
+	}, nil).Once()
+	c.mockTransport.Return200(c.req).Once()
+
+	res, err := c.client.do(c.client.HTTPClient, c.req)
+
+	c.NoError(err)
+	c.Equal(http.StatusOK, res.StatusCode)
+
+	expectedDelays := []time.Duration{300 * time.Second}
 	c.Equal(expectedDelays, c.timer.delays)
 }
 

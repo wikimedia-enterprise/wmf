@@ -852,12 +852,13 @@ func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response
 		}
 
 		if rtv != nil {
-			return nil, &RetryAfterError{Err: err, RetryAfter: *rtv}
+			return nil, &RetryAfterError{Err: fmt.Errorf("throttled, Retry-After value: %.2fs", rtv.Seconds()), RetryAfter: *rtv}
 		}
 
 		if esu {
 			// Wait 300 seconds if WMF API returns 502-504 status code. WMF APIs can block the IP for 5 minutes
-			return nil, &RetryAfterError{Err: err, RetryAfter: 300 * time.Second}
+			rtv := 300 * time.Second
+			return nil, &RetryAfterError{Err: fmt.Errorf("throttled/errored with no Retry-After, next retry in: %.2fs", rtv.Seconds()), RetryAfter: rtv}
 		}
 
 		// Default behavior, respecting clt.ExponentialBackOff and clt.DefaultRetryAfter

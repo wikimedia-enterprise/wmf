@@ -159,6 +159,25 @@ func (c *clientTestSuite) TestRespectsRetryAfterHeader() {
 	c.Equal(expectedDelays, c.timer.delays)
 }
 
+func (c *clientTestSuite) TestIgnoresZeroRetryAfterHeader() {
+	c.mockTransport.On("RoundTrip", c.req).Return(&http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{"Retry-After": []string{"0"}},
+		Body:       io.NopCloser(bytes.NewBufferString("")),
+	}, nil).Once()
+
+	c.mockTransport.Return200(c.req).Once()
+
+	res, err := c.client.do(c.client.HTTPClient, c.req)
+
+	c.NoError(err)
+	c.Equal(http.StatusOK, res.StatusCode)
+
+	// Uses default delay
+	expectedDelays := []time.Duration{10 * time.Millisecond}
+	c.Equal(expectedDelays, c.timer.delays)
+}
+
 func (c *clientTestSuite) TestDefault300SecondsOn502() {
 	c.mockTransport.On("RoundTrip", c.req).Return(&http.Response{
 		StatusCode: http.StatusBadGateway,

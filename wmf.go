@@ -923,6 +923,7 @@ func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page),
 		bdy.Set("apfilterredir", "nonredirects")
 		bdy.Set("format", "json")
 		bdy.Set("formatversion", "2")
+		bdy.Set("pilicense", "any")
 
 		for _, opt := range ops {
 			opt(&bdy)

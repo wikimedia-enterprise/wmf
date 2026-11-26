@@ -2,8 +2,6 @@ package wmf
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,20 +10,6 @@ import (
 	"time"
 	"unicode"
 )
-
-func getResponseError(rsp *Response) error {
-	if rsp.Error != nil {
-		dta, err := json.Marshal(rsp.Error)
-
-		if err != nil {
-			return err
-		}
-
-		return errors.New(string(dta))
-	}
-
-	return nil
-}
 
 func getRetryAfterValue(res *http.Response) (*time.Duration, error) {
 	for _, val := range res.Header["Retry-After"] {

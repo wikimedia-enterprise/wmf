@@ -871,8 +871,12 @@ func (c *Client) doUntraced(clt *http.Client, req *http.Request) (*http.Response
 			return nil, retry.Unrecoverable(err)
 		}
 
-		rer := fmt.Errorf("wmf api call returned status not 200, 206 or 302 for url %s with error %s", req.URL.String(), dta)
-		return nil, retry.Unrecoverable(rer)
+		herr := &HTTPError{StatusCode: res.StatusCode, URL: req.URL.String(), Body: dta}
+		if rtv, err := getRetryAfterValue(res); err == nil && rtv != nil {
+			herr.RetryAfter = *rtv
+		}
+
+		return nil, retry.Unrecoverable(herr)
 	}
 
 	return res, nil
@@ -943,7 +947,7 @@ func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page),
 
 		res, err := c.do(c.HTTPClient, req)
 		if err != nil {
-			return fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
+			return fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %w", req.URL.String(),
 				req.Method,
 				req.Header,
 				bdy.Encode(),
@@ -956,8 +960,8 @@ func (c *Client) GetAllPages(ctx context.Context, dtb string, cbk func([]*Page),
 			return err
 		}
 
-		if err := getResponseError(rsp); err != nil {
-			return fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+		if err := rsp.Error; err != nil {
+			return fmt.Errorf("%s:%w", http.StatusText(res.StatusCode), err)
 		}
 
 		pgs <- rsp.Query.AllPages
@@ -1039,8 +1043,8 @@ func (c *Client) GetPages(ctx context.Context, dtb string, tls []string, ops ...
 			return nil, err
 		}
 
-		if err := getResponseError(rsp); err != nil {
-			return nil, fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+		if err := rsp.Error; err != nil {
+			return nil, fmt.Errorf("%s:%w", http.StatusText(res.StatusCode), err)
 		}
 
 		if rsp.Query != nil {
@@ -1319,7 +1323,7 @@ func (c *Client) sendRequest(ctx context.Context, database string, args url.Valu
 
 	res, err := c.do(c.HTTPClient, req)
 	if err != nil {
-		return nil, fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
+		return nil, fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %w", req.URL.String(),
 			req.Method,
 			req.Header,
 			args.Encode(),
@@ -1333,8 +1337,8 @@ func (c *Client) sendRequest(ctx context.Context, database string, args url.Valu
 		return nil, fmt.Errorf("error decoding into JSON: %w", err)
 	}
 
-	if err := getResponseError(rsp); err != nil {
-		return nil, fmt.Errorf("error returned by WMF - %s:%v", http.StatusText(res.StatusCode), err)
+	if err := rsp.Error; err != nil {
+		return nil, fmt.Errorf("error returned by WMF - %s:%w", http.StatusText(res.StatusCode), err)
 	}
 
 	if len(rsp.Query.Pages) > 0 {
@@ -1378,7 +1382,7 @@ func (c *Client) GetAllRevisions(ctx context.Context, database string, pageid in
 		res, err := c.do(c.HTTPClient, req)
 
 		if err != nil {
-			return nil, fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %v", req.URL.String(),
+			return nil, fmt.Errorf("URL: %s\nMethod: %s\nHeaders: %v\nQueryParams: %s\nError: %w", req.URL.String(),
 				req.Method,
 				req.Header,
 				bdy.Encode(),
@@ -1392,8 +1396,8 @@ func (c *Client) GetAllRevisions(ctx context.Context, database string, pageid in
 			return nil, fmt.Errorf("error decoding into JSON: %w", err)
 		}
 
-		if err := getResponseError(rsp); err != nil {
-			return nil, fmt.Errorf("error returned by WMF - %s:%v", http.StatusText(res.StatusCode), err)
+		if err := rsp.Error; err != nil {
+			return nil, fmt.Errorf("error returned by WMF - %s:%w", http.StatusText(res.StatusCode), err)
 		}
 
 		if len(rsp.Query.Pages) > 0 {
@@ -1481,8 +1485,8 @@ func (c *Client) GetLanguages(ctx context.Context, dtb string, ops ...func(*url.
 		return nil, fmt.Errorf("error decoding response for languages, %w", err)
 	}
 
-	if err = getResponseError(rsp); err != nil {
-		ser := fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+	if err := rsp.Error; err != nil {
+		ser := fmt.Errorf("%s:%w", http.StatusText(res.StatusCode), err)
 		end(ser, "response error")
 		return nil, fmt.Errorf("error fetching languages, %w", ser)
 	}
@@ -1617,9 +1621,9 @@ func (c *Client) GetNamespaces(ctx context.Context, dtb string, ops ...func(*url
 		return nil, err
 	}
 
-	if err := getResponseError(rsp); err != nil {
+	if err := rsp.Error; err != nil {
 		end(err, "response error")
-		return nil, fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+		return nil, fmt.Errorf("%s:%w", http.StatusText(res.StatusCode), err)
 	}
 
 	nss := []*Namespace{}
@@ -1673,7 +1677,7 @@ func (c *Client) GetRandomPages(ctx context.Context, dtb string, ops ...func(*ur
 	}
 
 	if rsp.Error != nil {
-		ser := fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), errors.New(rsp.Error.Info))
+		ser := fmt.Errorf("%s:%w", http.StatusText(res.StatusCode), &textError{msg: rsp.Error.Info, err: rsp.Error})
 		end(ser, "response error")
 		return nil, ser
 	}
@@ -1728,8 +1732,8 @@ func (c *Client) GetUsers(ctx context.Context, dtb string, ids []int, ops ...fun
 		return nil, err
 	}
 
-	if err := getResponseError(rsp); err != nil {
-		ser := fmt.Errorf("%s:%v", http.StatusText(res.StatusCode), err)
+	if err := rsp.Error; err != nil {
+		ser := fmt.Errorf("%s:%w", http.StatusText(res.StatusCode), err)
 		end(ser, "response error")
 		return nil, ser
 	}
@@ -2123,7 +2127,7 @@ func (c *Client) GetWikibaseEntity(ctx context.Context, dtb string, entityID str
 
 	res, err := c.do(c.HTTPClient, req)
 	if err != nil {
-		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "Not Found") {
+		if errors.Is(err, ErrNotFound) {
 			return nil, ErrEntityNotFound
 		}
 		return nil, err
@@ -2145,21 +2149,21 @@ func (c *Client) GetWikibaseEntity(ctx context.Context, dtb string, entityID str
 	}
 
 	if rsp.Error != nil {
-		err = fmt.Errorf("wikibase entity API error: %s - %s", rsp.Error.Code, rsp.Error.Info)
+		err = &textError{msg: fmt.Sprintf("wikibase entity API error: %s - %s", rsp.Error.Code, rsp.Error.Info), err: rsp.Error}
 		return nil, err
 	}
 
-	if rsp.Entities != nil {
-		if entity, ok := rsp.Entities[entityID]; ok {
-			if entity.Missing {
-				err = ErrEntityNotFound
-				return nil, err
-			}
-		} else {
-			err = ErrEntityNotFound
-			return nil, err
-		}
-	} else {
+	entity, ok := rsp.Entities[entityID]
+
+	switch {
+	case ok && entity.Missing:
+		err = ErrEntityNotFound
+		return nil, err
+	case !ok && len(rsp.Entities) == 1:
+		// Special:EntityData follows redirects: a merged entity comes back under its target ID.
+		err = ErrEntityRedirected
+		return nil, err
+	case !ok:
 		err = ErrEntityNotFound
 		return nil, err
 	}
